@@ -6,6 +6,7 @@ Schedule: 07:00 SAST (05:00 UTC) via GitHub Actions
 """
 
 import os
+import time
 import smtplib
 import requests
 from datetime import datetime, timezone, timedelta
@@ -218,10 +219,6 @@ def send_email(html):
         s.login(os.environ["EMAIL_FROM"],os.environ["EMAIL_PASSWORD"])
         s.sendmail(os.environ["EMAIL_FROM"],os.environ["EMAIL_TO"],msg.as_string())
     print("Email sent.")
-
-import time  # Add this at the top if not already there
-
-import time
 
 def main():
     print(f"Claud-Market Daily Automation — {TODAY}")
