@@ -24,7 +24,7 @@ client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 def claude(prompt, use_search=False, max_tokens=800):
     kwargs = dict(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=max_tokens,
         messages=[{"role":"user","content":prompt}]
     )
