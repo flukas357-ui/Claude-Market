@@ -1,4 +1,4 @@
-name: Claud-Market Daily Report
+name: daily_report.yml
 
 on:
   schedule:
