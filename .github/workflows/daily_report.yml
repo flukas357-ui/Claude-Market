@@ -2,15 +2,15 @@ name: Claud-Market Daily Report
 
 on:
   schedule:
-    - cron: '0 5 * * 1-5'
-  workflow_dispatch:
+    - cron: '0 5 * * *'  # 07:00 SAST (05:00 UTC)
+  workflow_dispatch:      # allows manual trigger
 
 jobs:
   daily-report:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses:  node-version: '24'
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
