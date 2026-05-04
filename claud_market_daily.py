@@ -241,3 +241,5 @@ def main():
 
     html = build_email(a1, a3, a4, a5, compiled, fng)
     send_email(html)
+if __name__ == "__main__":
+    main()
