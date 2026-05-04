@@ -16,7 +16,7 @@ import anthropic
 
 SAST = timezone(timedelta(hours=2))
 TODAY = datetime.now(SAST).strftime("%A, %d %B %Y")
-ACCOUNT_BALANCE = 2000.00
+ACCOUNT_BALANCE = 10000.00
 DAILY_PNL = 0.00
 OPEN_POSITIONS = 0
 ASSETS = ["XAUUSD (Gold)","XAGUSD (Silver)","BTCUSD (Bitcoin)","ETHUSD (Ethereum)","NAS100 (NASDAQ)"]
@@ -144,8 +144,9 @@ AGENT 4 RISK: {a4}
 AGENT 5 SENTIMENT: {a5}
 FEAR & GREED: {fng['value']}/100 — {fng['label']}
 STRATEGY: v7.0 BB Breakout Daily chart long only
+ACCOUNT: $10,000 paper demo | Max risk per trade: $200 (2%) | Daily limit: $500 (5%) | Max 3 positions
 
-Produce the FINAL DAILY TRADE PLAN in this format:
+Produce the FINAL DAILY TRADE PLAN in this exact format:
 
 CLAUD-MARKET DAILY BRIEF — {TODAY}
 
@@ -168,7 +169,75 @@ RISK POSTURE:
 
 MASTER COMPILER VERDICT: [EXECUTE FULL PLAN|TRADE WITH CAUTION|HOLD ALL POSITIONS]
 
-Sign off: Claud-Market system — {TODAY} — All agents nominal.""", max_tokens=1200)
+═══════════════════════════════════════════
+TRADE APPROVAL CARD — {TODAY}
+═══════════════════════════════════════════
+Score each asset against these 5 boxes:
+Box 1 — News Risk: LOW or MEDIUM = PASS
+Box 2 — Sentiment: BULLISH or NEUTRAL = PASS
+Box 3 — Fear & Greed: between 30-75 = PASS
+Box 4 — Account Health: GOOD or EXCELLENT = PASS
+Box 5 — Strategy Fit: fits BB Breakout long = PASS
+
+GOLD (XAUUSD):
+  Box 1 News:      [PASS/FAIL] — [reason]
+  Box 2 Sentiment: [PASS/FAIL] — [reason]
+  Box 3 F&G:       [PASS/FAIL] — [reason]
+  Box 4 Account:   [PASS/FAIL] — [reason]
+  Box 5 Strategy:  [PASS/FAIL] — [reason]
+  SCORE: [X/5] → VERDICT: [✅ APPROVED|⚠️ CAUTION|❌ SKIP]
+  SIZE: 0.057 lots | ACTION: [exact instruction]
+
+SILVER (XAGUSD):
+  Box 1 News:      [PASS/FAIL] — [reason]
+  Box 2 Sentiment: [PASS/FAIL] — [reason]
+  Box 3 F&G:       [PASS/FAIL] — [reason]
+  Box 4 Account:   [PASS/FAIL] — [reason]
+  Box 5 Strategy:  [PASS/FAIL] — [reason]
+  SCORE: [X/5] → VERDICT: [✅ APPROVED|⚠️ CAUTION|❌ SKIP]
+  SIZE: 444 oz | ACTION: [exact instruction]
+
+BITCOIN (BTCUSD):
+  Box 1 News:      [PASS/FAIL] — [reason]
+  Box 2 Sentiment: [PASS/FAIL] — [reason]
+  Box 3 F&G:       [PASS/FAIL] — [reason]
+  Box 4 Account:   [PASS/FAIL] — [reason]
+  Box 5 Strategy:  [PASS/FAIL] — [reason]
+  SCORE: [X/5] → VERDICT: [✅ APPROVED|⚠️ CAUTION|❌ SKIP]
+  SIZE: 0.0016 BTC | ACTION: [exact instruction]
+
+ETHEREUM (ETHUSD):
+  Box 1 News:      [PASS/FAIL] — [reason]
+  Box 2 Sentiment: [PASS/FAIL] — [reason]
+  Box 3 F&G:       [PASS/FAIL] — [reason]
+  Box 4 Account:   [PASS/FAIL] — [reason]
+  Box 5 Strategy:  [PASS/FAIL] — [reason]
+  SCORE: [X/5] → VERDICT: [✅ APPROVED|⚠️ CAUTION|❌ SKIP]
+  SIZE: 0.117 ETH | ACTION: [exact instruction]
+
+NASDAQ (NAS100):
+  Box 1 News:      [PASS/FAIL] — [reason]
+  Box 2 Sentiment: [PASS/FAIL] — [reason]
+  Box 3 F&G:       [PASS/FAIL] — [reason]
+  Box 4 Account:   [PASS/FAIL] — [reason]
+  Box 5 Strategy:  [PASS/FAIL] — [reason]
+  SCORE: [X/5] → VERDICT: [✅ APPROVED|⚠️ CAUTION|❌ SKIP]
+  SIZE: 0.055 lots | ACTION: [exact instruction]
+
+DAILY SUMMARY:
+  Approved trades: [list assets with ✅]
+  Caution trades:  [list assets with ⚠️]
+  Skip today:      [list assets with ❌]
+
+YOUR MORNING CHECKLIST:
+  Step 1 — Read approval card above
+  Step 2 — Open TradingView, check BB signal fired on daily chart
+  Step 3 — If signal confirmed AND verdict is APPROVED → place trade on AvaTrade
+  Step 4 — Set stop loss at BB lower band
+  Step 5 — Check back at market close
+═══════════════════════════════════════════
+
+Sign off: Claud-Market system — {TODAY} — All agents nominal.""", max_tokens=2000)
 
 def build_email(a1,a3,a4,a5,compiled,fng):
     fng_color = (
