@@ -221,23 +221,29 @@ def send_email(html):
 
 import time  # Add this at the top if not already there
 
-def main():
-    # ... existing code ...
-    
-    a1 = run_agent1()
-    time.sleep(30)  # Wait 30 seconds
-    
-    a2 = run_agent2()
-    time.sleep(30)  # Wait 30 seconds
-    
-    a3 = run_agent3()
-    time.sleep(30)  # Wait 30 seconds
-    
-    a4 = run_agent4()
-    time.sleep(30)  # Wait 30 seconds
-    
-    a5 = run_agent5()
-    # No sleep needed after last agent
+import time
 
-if __name__=="__main__":
+def main():
+    print(f"Claud-Market Daily Automation — {TODAY}")
+    fng = get_fear_greed()
+    print(f"Fear & Greed: {fng['value']} — {fng['label']}")
+
+    a1 = run_agent1()
+    time.sleep(30)
+
+    a3 = run_agent3()
+    time.sleep(30)
+
+    a4 = run_agent4()
+    time.sleep(30)
+
+    a5 = run_agent5(fng)
+    time.sleep(30)
+
+    compiled = run_compiler(a1, a3, a4, a5, fng)
+
+    html = build_email(a1, a3, a4, a5, compiled, fng)
+    send_email(html)
+
+if __name__ == "__main__":
     main()
