@@ -226,21 +226,18 @@ def main():
     print(f"Fear & Greed: {fng['value']} — {fng['label']}")
 
     a1 = run_agent1()
-    time.sleep(30)
+    time.sleep(65)   # ← change from 30 to 65
 
     a3 = run_agent3()
-    time.sleep(30)
+    time.sleep(65)   # ← change from 30 to 65
 
     a4 = run_agent4()
-    time.sleep(30)
+    time.sleep(65)   # ← change from 30 to 65
 
     a5 = run_agent5(fng)
-    time.sleep(30)
+    time.sleep(65)   # ← change from 30 to 65
 
     compiled = run_compiler(a1, a3, a4, a5, fng)
 
     html = build_email(a1, a3, a4, a5, compiled, fng)
     send_email(html)
-
-if __name__ == "__main__":
-    main()
