@@ -1,1 +1,18 @@
-
+services:
+  - type: web
+    name: claude-market-webhook
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python webhook_server.py
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: EMAIL_TO
+        sync: false
+      - key: EMAIL_PASSWORD
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
