@@ -4,7 +4,7 @@
 > Started: 04 May 2026 | First Automatic Trade: 06 May 2026
 > 30-Day Challenge: 05 May → 04 June 2026
 
----
+--- 
 
 ## 🌐 Live Links
 
