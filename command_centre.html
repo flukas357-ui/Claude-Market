@@ -1,0 +1,1426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude-Market Command Centre v4.1</title>
+<style>
+  :root {
+    --bg: #0a0e1a; --bg2: #111827; --bg3: #1e2736;
+    --green: #00ff88; --red: #ff4444; --yellow: #ffcc00;
+    --blue: #4fa3ff; --purple: #a78bfa; --orange: #fb923c;
+    --text: #e2e8f0; --muted: #64748b; --border: #2d3748;
+    --font: 'Segoe UI', system-ui, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { font-size: 110%; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
+
+  /* ── Top Bar ── */
+  .topbar {
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    padding: 10px 20px; display: flex; align-items: center; gap: 20px;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo { font-size: 1.3rem; font-weight: 700; color: var(--green); letter-spacing: 1px; }
+  .version { font-size: 0.75rem; color: var(--muted); }
+  .clock { font-size: 1.1rem; font-weight: 600; color: var(--yellow); margin-left: auto; }
+
+  /* ── Kill Switch ── */
+  .kill-switch {
+    padding: 10px 28px; border-radius: 8px; border: none; cursor: pointer;
+    font-size: 1rem; font-weight: 700; letter-spacing: 0.5px; transition: all 0.2s;
+  }
+  .kill-on  { background: var(--green); color: #000; }
+  .kill-off { background: var(--red);   color: #fff; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.7} }
+
+  /* ── Navigation ── */
+  .nav { display: flex; gap: 4px; padding: 8px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); }
+  .nav-btn {
+    padding: 8px 22px; border-radius: 6px; border: 1px solid var(--border);
+    background: transparent; color: var(--muted); cursor: pointer; font-size: 0.92rem; transition: all 0.2s;
+  }
+  .nav-btn.active { background: var(--bg3); color: var(--green); border-color: var(--green); }
+
+  /* ── Health Bar ── */
+  .health-bar {
+    display: flex; gap: 12px; padding: 10px 20px; background: var(--bg3);
+    border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  .hitem { display: flex; align-items: center; gap: 6px; font-size: 0.88rem; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.red   { background: var(--red);   box-shadow: 0 0 6px var(--red); }
+  .dot.yellow{ background: var(--yellow);box-shadow: 0 0 6px var(--yellow); }
+
+  /* ── Pages ── */
+  .page { display: none; padding: 16px 20px; }
+  .page.active { display: block; }
+
+  /* ── Grid ── */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 14px; }
+
+  /* ── Card ── */
+  .card {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 14px;
+  }
+  .card-title { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .big-num { font-size: 2.2rem; font-weight: 700; }
+  .green-num { color: var(--green); }
+  .red-num   { color: var(--red); }
+  .yellow-num{ color: var(--yellow); }
+
+  /* ── Account Cards ── */
+  .account-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 12px; margin-bottom: 14px; }
+  .acc-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
+  .acc-label { font-size: 0.74rem; color: var(--muted); margin-bottom: 4px; }
+  .acc-value { font-size: 1.5rem; font-weight: 700; }
+
+  /* ── Positions Table ── */
+  .pos-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  .pos-table th { background: var(--bg3); color: var(--muted); padding: 8px 10px; text-align: left; font-size: 0.78rem; }
+  .pos-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
+  .pos-table tr:hover td { background: var(--bg3); }
+  .badge { padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
+  .badge.buy  { background: rgba(0,255,136,0.15); color: var(--green); }
+  .badge.sell { background: rgba(255,68,68,0.15);  color: var(--red); }
+  .badge.range{ background: rgba(255,204,0,0.15);  color: var(--yellow); }
+  .trail-badge { padding: 2px 7px; border-radius: 4px; font-size: 0.7rem; }
+  .trail-L3 { background: rgba(0,255,136,0.3); color: var(--green); }
+  .trail-L2 { background: rgba(255,204,0,0.3);  color: var(--yellow); }
+  .trail-L1 { background: rgba(79,163,255,0.3); color: var(--blue); }
+  .trail-NO { background: rgba(100,116,139,0.2); color: var(--muted); }
+
+  /* ── Signal Panel ── */
+  .signal-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .sel-sym { padding: 9px 14px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.92rem; cursor: pointer; }
+  .sel-sym.active { border-color: var(--blue); color: var(--blue); }
+  .btn { padding: 9px 20px; border-radius: 6px; border: none; cursor: pointer; font-size: 0.92rem; font-weight: 600; transition: all 0.2s; }
+  .btn-buy  { background: var(--green); color: #000; }
+  .btn-sell { background: var(--red);   color: #fff; }
+  .btn-send { background: var(--blue);  color: #fff; }
+  .btn:hover { opacity: 0.85; transform: translateY(-1px); }
+
+  /* ── Market Hours ── */
+  .mkt-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 10px; margin-bottom: 14px; }
+  .mkt-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 10px; text-align: center; }
+  .mkt-name { font-size: 0.82rem; color: var(--muted); margin-bottom: 4px; }
+  .mkt-status { font-size: 1rem; font-weight: 700; }
+  .mkt-open   { color: var(--green); }
+  .mkt-closed { color: var(--red); }
+
+  /* ── Log ── */
+  .log-box { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 10px; height: 180px; overflow-y: auto; font-size: 0.8rem; font-family: monospace; }
+  .log-entry { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .log-time { color: var(--muted); margin-right: 8px; }
+  .log-ok  { color: var(--green); }
+  .log-err { color: var(--red); }
+  .log-info{ color: var(--blue); }
+  .log-warn{ color: var(--yellow); }
+
+  /* ── Scanner Page ── */
+  .scanner-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  .stage-progress { display: flex; gap: 8px; align-items: center; }
+  .stage-pill { padding: 5px 14px; border-radius: 20px; font-size: 0.8rem; font-weight: 700; background: var(--bg3); border: 1px solid var(--border); color: var(--muted); }
+  .stage-pill.active { border-color: var(--green); color: var(--green); }
+  .stage-pill.done   { border-color: var(--blue);  color: var(--blue);  }
+  .arrow { color: var(--muted); font-size: 0.8rem; }
+
+  .winner-card { background: linear-gradient(135deg,rgba(0,255,136,0.1),rgba(79,163,255,0.1)); border: 1px solid var(--green); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .winner-sym { font-size: 2rem; font-weight: 800; color: var(--green); }
+  .winner-meta { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
+
+  .group-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .group-title { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .group-winner { font-size: 1.1rem; font-weight: 700; color: var(--yellow); margin-bottom: 6px; }
+  .group-top5 { display: flex; gap: 5px; flex-wrap: wrap; }
+  .asset-chip { padding: 3px 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; font-size: 0.74rem; color: var(--muted); }
+  .asset-chip.winner { border-color: var(--yellow); color: var(--yellow); }
+
+  /* ── History ── */
+  .history-row { display: flex; gap: 10px; padding: 6px 10px; background: var(--bg3); border-radius: 6px; margin-bottom: 4px; font-size: 0.82rem; align-items: center; }
+
+  /* ── Websites Page ── */
+  .website-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; }
+  .site-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 14px; text-decoration: none; color: var(--text); transition: all 0.2s; display: block; }
+  .site-card:hover { border-color: var(--blue); transform: translateY(-2px); }
+  .site-icon { font-size: 1.8rem; margin-bottom: 6px; }
+  .site-name { font-size: 1rem; font-weight: 700; margin-bottom: 4px; }
+  .site-desc { font-size: 0.78rem; color: var(--muted); }
+  .site-url  { font-size: 0.72rem; color: var(--blue); margin-top: 6px; word-break: break-all; }
+
+  .full-width { grid-column: 1 / -1; }
+  .mt-ea-badge { display: inline-block; padding: 3px 10px; background: rgba(0,255,136,0.15); border-radius: 20px; font-size: 0.78rem; color: var(--green); }
+</style>
+</head>
+<body>
+
+<!-- ── Top Bar ─────────────────────────────────────────────────────────────── -->
+<div class="topbar">
+  <div>
+    <div class="logo">⚡ CLAUDE-MARKET</div>
+    <div class="version">Command Centre v4.2 | Lukas Ferreira — Pretoria 🇿🇦</div>
+  </div>
+  <button class="kill-switch kill-on" id="killSwitch" onclick="toggleKillSwitch()">
+    🟢 TRADING ACTIVE
+  </button>
+  <div class="clock" id="clock">--:--:-- SAST</div>
+</div>
+
+<!-- ── Health Bar ───────────────────────────────────────────────────────────── -->
+<div class="health-bar">
+  <div class="hitem"><div class="dot" id="dot-webhook"></div><span>Webhook</span></div>
+  <div class="hitem"><div class="dot" id="dot-mt5"></div><span>MT5 EA</span></div>
+  <div class="hitem"><div class="dot" id="dot-signal"></div><span>Signal</span></div>
+  <div class="hitem"><div class="dot" id="dot-scanner"></div><span>Scanner</span></div>
+  <div class="hitem"><div class="dot" id="dot-internet"></div><span>Internet</span></div>
+  <div class="hitem"><div class="dot" id="dot-kill"></div><span id="kill-label">Kill Switch OFF</span></div>
+  <span style="margin-left:auto;font-size:0.8rem;color:var(--muted)" id="last-update">Initialising...</span>
+</div>
+
+<!-- ── Nav ─────────────────────────────────────────────────────────────────── -->
+<div class="nav">
+  <button class="nav-btn active" onclick="showPage('dashboard',this)">📊 Dashboard</button>
+  <button class="nav-btn" onclick="showPage('scanner',this)">🔭 Scanner Intelligence</button>
+  <button class="nav-btn" onclick="showPage('websites',this)">🌐 All Websites</button>
+  <button class="nav-btn" onclick="showPage('files',this)">📁 Files &amp; Versions</button>
+  <button class="nav-btn" onclick="showPage('howto',this)">📖 How It Works</button>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- PAGE 1: DASHBOARD                                                          -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="page active" id="page-dashboard">
+
+  <!-- Account -->
+  <div class="account-grid">
+    <div class="acc-card">
+      <div class="acc-label">Balance</div>
+      <div class="acc-value green-num" id="acc-balance">$--</div>
+    </div>
+    <div class="acc-card">
+      <div class="acc-label">Equity</div>
+      <div class="acc-value" id="acc-equity">$--</div>
+    </div>
+    <div class="acc-card">
+      <div class="acc-label">Margin Used</div>
+      <div class="acc-value" id="acc-margin">$--</div>
+    </div>
+    <div class="acc-card">
+      <div class="acc-label">Free Margin</div>
+      <div class="acc-value" id="acc-free">$--</div>
+    </div>
+    <div class="acc-card">
+      <div class="acc-label">Daily P&amp;L</div>
+      <div class="acc-value" id="acc-pnl">$--</div>
+    </div>
+  </div>
+
+  <!-- EA Status + Market Hours -->
+  <div class="grid2">
+    <div class="card">
+      <div class="card-title">🤖 EA Status</div>
+      <div style="display:flex;gap:16px;align-items:center">
+        <div class="mt-ea-badge" id="ea-badge">● Connecting...</div>
+        <div style="font-size:0.85rem;color:var(--muted)" id="ea-version">EA v8.1</div>
+        <div style="font-size:0.85rem;color:var(--muted)" id="ea-account">Acct: --</div>
+      </div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-top:8px" id="ea-lastupdate">Last report: --</div>
+    </div>
+    <div class="card">
+      <div class="card-title">📡 Signal Status</div>
+      <div style="font-size:0.9rem" id="signal-status">Polling webhook...</div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-top:6px" id="last-signal">Last signal: --</div>
+    </div>
+  </div>
+
+  <!-- Open Positions -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title" style="margin-bottom:10px">📈 Open Positions <span id="pos-count" style="color:var(--yellow)"></span></div>
+    <table class="pos-table">
+      <thead>
+        <tr>
+          <th>Ticket</th><th>Symbol</th><th>Type</th><th>Lots</th>
+          <th>Entry</th><th>SL</th><th>TP</th><th>Trail</th><th>P&amp;L</th>
+        </tr>
+      </thead>
+      <tbody id="pos-tbody">
+        <tr><td colspan="9" style="color:var(--muted);text-align:center;padding:20px">No open positions</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Signal Control + Market Hours -->
+  <div class="grid2">
+    <div class="card">
+      <div class="card-title">📡 Send Signal</div>
+      <div class="signal-row">
+        <button class="sel-sym active" id="sym-GOLD"   onclick="selectSym('GOLD')">GOLD</button>
+        <button class="sel-sym"        id="sym-SILVER" onclick="selectSym('SILVER')">SILVER</button>
+        <button class="sel-sym"        id="sym-BTC"    onclick="selectSym('BTCUSD')">BTC</button>
+        <button class="sel-sym"        id="sym-ETH"    onclick="selectSym('ETHUSD')">ETH</button>
+        <button class="sel-sym"        id="sym-NAS"    onclick="selectSym('NAS100')">NAS100</button>
+      </div>
+      <div class="signal-row">
+        <button class="btn btn-buy  active" id="dir-BUY"  onclick="selectDir('BUY')">▲ BUY</button>
+        <button class="btn btn-sell"        id="dir-SELL" onclick="selectDir('SELL')">▼ SELL</button>
+        <button class="btn btn-send" onclick="sendSignal()">🚀 SEND</button>
+      </div>
+      <div style="font-size:0.82rem;color:var(--muted)" id="send-result">Select asset and direction, then send.</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🕐 Market Hours (SAST = UTC+2)</div>
+      <div class="mkt-grid" style="grid-template-columns:repeat(5,1fr)">
+        <div class="mkt-card"><div class="mkt-name">GOLD</div><div class="mkt-status" id="mkt-GOLD">-</div></div>
+        <div class="mkt-card"><div class="mkt-name">SILVER</div><div class="mkt-status" id="mkt-SILVER">-</div></div>
+        <div class="mkt-card"><div class="mkt-name">BTC</div><div class="mkt-status mkt-open">24/7</div></div>
+        <div class="mkt-card"><div class="mkt-name">ETH</div><div class="mkt-status mkt-open">24/7</div></div>
+        <div class="mkt-card"><div class="mkt-name">NAS100</div><div class="mkt-status" id="mkt-NAS100">-</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="card">
+    <div class="card-title">📋 System Log</div>
+    <div class="log-box" id="logbox"></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- PAGE 2: SCANNER INTELLIGENCE                                               -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="page" id="page-scanner">
+  <div class="scanner-header">
+    <div>
+      <h2 style="font-size:1.3rem;margin-bottom:4px">🔭 Scanner Intelligence</h2>
+      <div style="font-size:0.82rem;color:var(--muted)">
+        Last run: <span id="scan-last">--</span> &nbsp;|&nbsp; Next: <span id="scan-next">--</span>
+        &nbsp;|&nbsp; 54 assets × 6 groups
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <div class="stage-progress">
+        <div class="stage-pill" id="pill1">Stage 1: Broad Scan</div>
+        <div class="arrow">→</div>
+        <div class="stage-pill" id="pill2">Stage 2: Group Winners</div>
+        <div class="arrow">→</div>
+        <div class="stage-pill" id="pill3">Stage 3: Global Champion</div>
+        <div class="arrow">→</div>
+        <div class="stage-pill" id="pill4">🚀 Signal Fired</div>
+      </div>
+      <button class="btn btn-send" onclick="triggerScan()">▶ Scan Now</button>
+      <button class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text)" onclick="loadScannerData()">🔄 Refresh Data</button>
+    </div>
+  </div>
+
+  <!-- Global Winner -->
+  <div class="winner-card" id="global-winner-card" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-size:0.75rem;color:var(--muted);margin-bottom:4px">🏆 GLOBAL CHAMPION</div>
+        <div class="winner-sym" id="win-sym">--</div>
+        <div class="winner-meta" id="win-meta">--</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:6px" id="win-reason">--</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:0.75rem;color:var(--muted)">SCORE</div>
+        <div style="font-size:3rem;font-weight:800;color:var(--green)" id="win-score">-/5</div>
+        <div style="font-size:0.8rem" id="win-conf">--</div>
+      </div>
+    </div>
+  </div>
+  <div id="no-winner" style="background:var(--bg2);border:1px dashed var(--border);border-radius:10px;padding:20px;text-align:center;color:var(--muted);margin-bottom:14px">
+    No global winner yet — scanner runs every 30 minutes automatically, or click Scan Now
+  </div>
+
+  <!-- Group Cards -->
+  <div class="grid3" id="group-cards">
+    <!-- Populated by JS -->
+  </div>
+
+  <!-- Scan History -->
+  <div class="card">
+    <div class="card-title" style="margin-bottom:10px">📜 Scan History (Last 20)</div>
+    <div id="scan-history" style="font-size:0.85rem;color:var(--muted);text-align:center">No history yet</div>
+  </div>
+
+  <!-- Rotation Guard -->
+  <div class="card" style="margin-top:14px">
+    <div class="card-title">🔄 Rotation Guard (excluded from next scan)</div>
+    <div id="rotation-list" style="font-size:0.85rem;color:var(--yellow);margin-top:6px">None</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- PAGE 3: ALL WEBSITES                                                       -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="page" id="page-websites">
+  <h2 style="font-size:1.3rem;margin-bottom:14px">🌐 Claude-Market — All Platforms</h2>
+
+  <div class="website-grid">
+    <!-- Claude-Market -->
+    <a class="site-card" href="https://claude-market.onrender.com" target="_blank">
+      <div class="site-icon">⚡</div>
+      <div class="site-name">Webhook Server</div>
+      <div class="site-desc">Claude-Market API v5.0. Signal ingestion, 3-stage scanner, kill switch, EA status.</div>
+      <div class="site-url">claude-market.onrender.com</div>
+    </a>
+    <a class="site-card" href="https://claude-market.onrender.com/signal" target="_blank">
+      <div class="site-icon">📡</div>
+      <div class="site-name">Signal Status</div>
+      <div class="site-desc">Live signal endpoint. EA polls every 10 seconds. Shows pending signal or false.</div>
+      <div class="site-url">claude-market.onrender.com/signal</div>
+    </a>
+    <a class="site-card" href="https://claude-market.onrender.com/status" target="_blank">
+      <div class="site-icon">📊</div>
+      <div class="site-name">MT5 Live Status</div>
+      <div class="site-desc">Real-time EA report. Balance, equity, positions, trading status from MT5.</div>
+      <div class="site-url">claude-market.onrender.com/status</div>
+    </a>
+    <a class="site-card" href="https://claude-market.onrender.com/scanner/results" target="_blank">
+      <div class="site-icon">🔭</div>
+      <div class="site-name">Scanner Results</div>
+      <div class="site-desc">Full 3-stage scan results. All 6 groups, winners, global champion, history.</div>
+      <div class="site-url">claude-market.onrender.com/scanner/results</div>
+    </a>
+
+    <!-- Trading -->
+    <a class="site-card" href="https://dashboard.render.com" target="_blank">
+      <div class="site-icon">🖥️</div>
+      <div class="site-name">Render Dashboard</div>
+      <div class="site-desc">Deploy and monitor webhook server. Check logs, trigger manual deploy, view errors.</div>
+      <div class="site-url">dashboard.render.com</div>
+    </a>
+    <a class="site-card" href="https://github.com/flukas357-ui/Claude-Market" target="_blank">
+      <div class="site-icon">🐙</div>
+      <div class="site-name">GitHub Repository</div>
+      <div class="site-desc">Source code for all components. EA, webhook, agents, command centre files.</div>
+      <div class="site-url">github.com/flukas357-ui/Claude-Market</div>
+    </a>
+    <a class="site-card" href="https://claude-market-za.netlify.app" target="_blank">
+      <div class="site-icon">📱</div>
+      <div class="site-name">Mobile Dashboard</div>
+      <div class="site-desc">Phone-optimised Claude-Market dashboard. Monitor on the go from any device.</div>
+      <div class="site-url">claude-market-za.netlify.app</div>
+    </a>
+    <a class="site-card" href="https://www.tradingview.com/chart/" target="_blank">
+      <div class="site-icon">📈</div>
+      <div class="site-name">TradingView</div>
+      <div class="site-desc">BB Breakout v7.0 alerts. All 5 assets connected. BUY + SELL signals automated.</div>
+      <div class="site-url">tradingview.com</div>
+    </a>
+
+    <!-- Broker -->
+    <a class="site-card" href="https://www.avatrade.com" target="_blank">
+      <div class="site-icon">🏦</div>
+      <div class="site-name">AvaTrade Broker</div>
+      <div class="site-desc">Ava-Demo 1-MT5 | Account 107072723. Live demo trading environment.</div>
+      <div class="site-url">avatrade.com</div>
+    </a>
+
+    <!-- AI -->
+    <a class="site-card" href="https://claude.ai" target="_blank">
+      <div class="site-icon">🤖</div>
+      <div class="site-name">Claude AI</div>
+      <div class="site-desc">Anthropic Claude — powers signal validation, range scanner, and agent reports.</div>
+      <div class="site-url">claude.ai</div>
+    </a>
+    <a class="site-card" href="https://console.anthropic.com" target="_blank">
+      <div class="site-icon">🔑</div>
+      <div class="site-name">Anthropic Console</div>
+      <div class="site-desc">API key management, usage monitoring, billing. Claude API integration.</div>
+      <div class="site-url">console.anthropic.com</div>
+    </a>
+    <a class="site-card" href="https://alternative.me/crypto/fear-and-greed-index/" target="_blank">
+      <div class="site-icon">😨</div>
+      <div class="site-name">Crypto Fear &amp; Greed</div>
+      <div class="site-desc">Sentiment indicator. Agent 5 monitors this for market mood analysis daily.</div>
+      <div class="site-url">alternative.me/crypto/fear-and-greed-index</div>
+    </a>
+
+    <!-- Kill Switch Quick Actions -->
+    <div class="site-card" style="cursor:default;background:rgba(255,68,68,0.05);border-color:rgba(255,68,68,0.3)">
+      <div class="site-icon">🛑</div>
+      <div class="site-name">Quick: Stop Trading</div>
+      <div class="site-desc">Immediately halt all trading system-wide. EA will not execute any new trades.</div>
+      <a href="https://claude-market.onrender.com/trading/stop" target="_blank" class="btn btn-sell" style="display:inline-block;margin-top:8px;font-size:0.82rem;padding:6px 14px;text-decoration:none">⛔ STOP ALL</a>
+    </div>
+    <div class="site-card" style="cursor:default;background:rgba(0,255,136,0.05);border-color:rgba(0,255,136,0.3)">
+      <div class="site-icon">▶️</div>
+      <div class="site-name">Quick: Resume Trading</div>
+      <div class="site-desc">Resume all trading after kill switch. EA will start processing signals again.</div>
+      <a href="https://claude-market.onrender.com/trading/resume" target="_blank" class="btn btn-buy" style="display:inline-block;margin-top:8px;font-size:0.82rem;padding:6px 14px;text-decoration:none">✅ RESUME</a>
+    </div>
+    <div class="site-card" style="cursor:default">
+      <div class="site-icon">🔭</div>
+      <div class="site-name">Quick: Run Scanner</div>
+      <div class="site-desc">Trigger the 3-stage global scanner immediately. Finds best range opportunity now.</div>
+      <a href="https://claude-market.onrender.com/scanner/run" target="_blank" class="btn btn-send" style="display:inline-block;margin-top:8px;font-size:0.82rem;padding:6px 14px;text-decoration:none">▶ SCAN NOW</a>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- PAGE 4: FILES & VERSIONS                                                   -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="page" id="page-files">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <div>
+      <h2 style="font-size:1.3rem;margin-bottom:4px">📁 Files &amp; Versions</h2>
+      <div style="font-size:0.82rem;color:var(--muted)">All Claude-Market components — latest versions, locations and direct GitHub links</div>
+    </div>
+    <a href="https://github.com/flukas357-ui/Claude-Market" target="_blank"
+       style="padding:9px 20px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);text-decoration:none;font-size:0.9rem;font-weight:600">
+      🐙 Open GitHub Repo
+    </a>
+  </div>
+
+  <!-- Core Trading Files -->
+  <div style="font-size:0.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">⚡ Core Trading Files</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
+
+    <div class="card" style="border-left:3px solid var(--green)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+        <div>
+          <div style="font-size:1rem;font-weight:700">🤖 Expert Advisor</div>
+          <div style="font-size:0.78rem;color:var(--muted)">ClaudMarket_EA.mq5</div>
+        </div>
+        <span style="background:rgba(0,255,136,0.15);color:var(--green);padding:3px 10px;border-radius:20px;font-size:0.8rem;font-weight:700">v8.1</span>
+      </div>
+      <div style="font-size:0.82rem;color:var(--muted);margin-bottom:10px">
+        Trailing stops (L1/L2/L3) · Kill switch · Range + BB trading · Dynamic 2% sizing · Scale-in · Universal ATR SL · FOK auto-detect · Status reporting
+      </div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:8px">📂 MT5: <span style="color:var(--yellow)">MQL5\Experts\ClaudMarket_EA.mq5</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a href="https://github.com/flukas357-ui/Claude-Market/blob/main/ClaudMarket_EA.mq5" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.78rem;padding:5px 12px">👁 View</a>
+        <a href="https://raw.githubusercontent.com/flukas357-ui/Claude-Market/main/ClaudMarket_EA.mq5" target="_blank" class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);text-decoration:none;font-size:0.78rem;padding:5px 12px">⬇ Download</a>
+        <a href="https://github.com/flukas357-ui/Claude-Market/edit/main/ClaudMarket_EA.mq5" target="_blank" class="btn" style="background:var(--purple);color:#fff;text-decoration:none;font-size:0.78rem;padding:5px 12px">✏️ Edit</a>
+      </div>
+    </div>
+
+    <div class="card" style="border-left:3px solid var(--blue)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+        <div>
+          <div style="font-size:1rem;font-weight:700">⚡ Webhook Server</div>
+          <div style="font-size:0.78rem;color:var(--muted)">webhook_server.py</div>
+        </div>
+        <span style="background:rgba(79,163,255,0.15);color:var(--blue);padding:3px 10px;border-radius:20px;font-size:0.8rem;font-weight:700">v5.0</span>
+      </div>
+      <div style="font-size:0.82rem;color:var(--muted);margin-bottom:10px">
+        3-stage global scanner · 54 assets × 6 groups · Kill switch · /signal · /status · /webhook · Rotation guard · Range detection · 30-min auto-scan
+      </div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:8px">☁️ Render: <span style="color:var(--yellow)">claude-market.onrender.com</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a href="https://github.com/flukas357-ui/Claude-Market/blob/main/webhook_server.py" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.78rem;padding:5px 12px">👁 View</a>
+        <a href="https://raw.githubusercontent.com/flukas357-ui/Claude-Market/main/webhook_server.py" target="_blank" class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);text-decoration:none;font-size:0.78rem;padding:5px 12px">⬇ Download</a>
+        <a href="https://github.com/flukas357-ui/Claude-Market/edit/main/webhook_server.py" target="_blank" class="btn" style="background:var(--purple);color:#fff;text-decoration:none;font-size:0.78rem;padding:5px 12px">✏️ Edit</a>
+      </div>
+    </div>
+
+    <div class="card" style="border-left:3px solid var(--yellow)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+        <div>
+          <div style="font-size:1rem;font-weight:700">🖥️ Command Centre</div>
+          <div style="font-size:0.78rem;color:var(--muted)">command_centre.html</div>
+        </div>
+        <span style="background:rgba(255,204,0,0.15);color:var(--yellow);padding:3px 10px;border-radius:20px;font-size:0.8rem;font-weight:700">v4.0</span>
+      </div>
+      <div style="font-size:0.82rem;color:var(--muted);margin-bottom:10px">
+        4 pages · Live MT5 data · Kill switch · Open positions + trail badges · Signal sender · Scanner intelligence · All websites · Files &amp; versions (this page)
+      </div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:8px">🖥️ Desktop: <span style="color:var(--yellow)">Open in Chrome — bookmark it</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a href="https://github.com/flukas357-ui/Claude-Market/blob/main/command_centre.html" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.78rem;padding:5px 12px">👁 View</a>
+        <a href="https://raw.githubusercontent.com/flukas357-ui/Claude-Market/main/command_centre.html" target="_blank" class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);text-decoration:none;font-size:0.78rem;padding:5px 12px">⬇ Download</a>
+        <a href="https://github.com/flukas357-ui/Claude-Market/edit/main/command_centre.html" target="_blank" class="btn" style="background:var(--purple);color:#fff;text-decoration:none;font-size:0.78rem;padding:5px 12px">✏️ Edit</a>
+      </div>
+    </div>
+
+    <div class="card" style="border-left:3px solid var(--orange)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+        <div>
+          <div style="font-size:1rem;font-weight:700">🤖 Daily Agents</div>
+          <div style="font-size:0.78rem;color:var(--muted)">claud_market_daily.py</div>
+        </div>
+        <span style="background:rgba(251,146,60,0.15);color:var(--orange);padding:3px 10px;border-radius:20px;font-size:0.8rem;font-weight:700">v2.0</span>
+      </div>
+      <div style="font-size:0.82rem;color:var(--muted);margin-bottom:10px">
+        6 agents: Global Scanner · Primary Analysis · Performance Review · Risk Manager · Global Sentiment · Range Scout + Master email report. Runs 07:00 SAST daily.
+      </div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:8px">⚙️ GitHub Actions: <span style="color:var(--yellow)">07:00 SAST every day</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a href="https://github.com/flukas357-ui/Claude-Market/blob/main/claud_market_daily.py" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.78rem;padding:5px 12px">👁 View</a>
+        <a href="https://raw.githubusercontent.com/flukas357-ui/Claude-Market/main/claud_market_daily.py" target="_blank" class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);text-decoration:none;font-size:0.78rem;padding:5px 12px">⬇ Download</a>
+        <a href="https://github.com/flukas357-ui/Claude-Market/edit/main/claud_market_daily.py" target="_blank" class="btn" style="background:var(--purple);color:#fff;text-decoration:none;font-size:0.78rem;padding:5px 12px">✏️ Edit</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Support Files -->
+  <div style="font-size:0.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">🔧 Support Files</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-weight:700">📋 requirements.txt</div>
+        <span style="background:rgba(100,116,139,0.2);color:var(--muted);padding:2px 8px;border-radius:20px;font-size:0.75rem">v1.0</span>
+      </div>
+      <div style="font-size:0.8rem;color:var(--muted);margin-bottom:8px">Flask, Anthropic, Requests, Gunicorn. Required by Render to install Python packages on deploy.</div>
+      <div style="font-size:0.75rem;color:var(--muted);margin-bottom:8px">☁️ GitHub root → Render reads automatically</div>
+      <div style="display:flex;gap:6px">
+        <a href="https://github.com/flukas357-ui/Claude-Market/blob/main/requirements.txt" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.75rem;padding:4px 10px">👁 View</a>
+        <a href="https://github.com/flukas357-ui/Claude-Market/edit/main/requirements.txt" target="_blank" class="btn" style="background:var(--purple);color:#fff;text-decoration:none;font-size:0.75rem;padding:4px 10px">✏️ Edit</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-weight:700">⚙️ daily_report.yml</div>
+        <span style="background:rgba(100,116,139,0.2);color:var(--muted);padding:2px 8px;border-radius:20px;font-size:0.75rem">v1.0</span>
+      </div>
+      <div style="font-size:0.8rem;color:var(--muted);margin-bottom:8px">GitHub Actions workflow. Triggers agents at 05:00 UTC (07:00 SAST) every day. Has manual run button.</div>
+      <div style="font-size:0.75rem;color:var(--muted);margin-bottom:8px">📂 .github/workflows/daily_report.yml</div>
+      <div style="display:flex;gap:6px">
+        <a href="https://github.com/flukas357-ui/Claude-Market/blob/main/.github/workflows/daily_report.yml" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.75rem;padding:4px 10px">👁 View</a>
+        <a href="https://github.com/flukas357-ui/Claude-Market/edit/main/.github/workflows/daily_report.yml" target="_blank" class="btn" style="background:var(--purple);color:#fff;text-decoration:none;font-size:0.75rem;padding:4px 10px">✏️ Edit</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-weight:700">📖 README.md</div>
+        <span style="background:rgba(100,116,139,0.2);color:var(--muted);padding:2px 8px;border-radius:20px;font-size:0.75rem">v2.0</span>
+      </div>
+      <div style="font-size:0.8rem;color:var(--muted);margin-bottom:8px">Full project documentation. All components, endpoints, deployment steps, version history, risk rules.</div>
+      <div style="font-size:0.75rem;color:var(--muted);margin-bottom:8px">📂 GitHub root → displays on repo homepage</div>
+      <div style="display:flex;gap:6px">
+        <a href="https://github.com/flukas357-ui/Claude-Market/blob/main/README.md" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.75rem;padding:4px 10px">👁 View</a>
+        <a href="https://github.com/flukas357-ui/Claude-Market/edit/main/README.md" target="_blank" class="btn" style="background:var(--purple);color:#fff;text-decoration:none;font-size:0.75rem;padding:4px 10px">✏️ Edit</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Deploy Cheatsheet -->
+  <div style="font-size:0.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">🚀 Deploy Cheatsheet</div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+    <div class="card" style="text-align:center">
+      <div style="font-size:1.5rem;margin-bottom:6px">1️⃣</div>
+      <div style="font-weight:700;margin-bottom:4px">GitHub</div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:10px">Upload/edit files → commit</div>
+      <a href="https://github.com/flukas357-ui/Claude-Market" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.78rem;padding:6px 12px;display:inline-block">Open Repo</a>
+    </div>
+    <div class="card" style="text-align:center">
+      <div style="font-size:1.5rem;margin-bottom:6px">2️⃣</div>
+      <div style="font-weight:700;margin-bottom:4px">Render</div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:10px">Manual Deploy → watch logs → confirm v5.0</div>
+      <a href="https://dashboard.render.com" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.78rem;padding:6px 12px;display:inline-block">Open Render</a>
+    </div>
+    <div class="card" style="text-align:center">
+      <div style="font-size:1.5rem;margin-bottom:6px">3️⃣</div>
+      <div style="font-weight:700;margin-bottom:4px">MT5</div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:10px">Copy EA → F7 compile → remove → reattach</div>
+      <div style="font-size:0.78rem;color:var(--yellow)">MQL5\Experts\</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div style="font-size:1.5rem;margin-bottom:6px">4️⃣</div>
+      <div style="font-weight:700;margin-bottom:4px">Verify</div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:10px">Webhook live · EA green · Scanner running</div>
+      <a href="https://claude-market.onrender.com" target="_blank" class="btn btn-send" style="text-decoration:none;font-size:0.78rem;padding:6px 12px;display:inline-block">Check Server</a>
+    </div>
+  </div>
+
+  <!-- Version Summary -->
+  <div class="card">
+    <div class="card-title" style="margin-bottom:10px">📊 Version Summary</div>
+    <table class="pos-table">
+      <thead>
+        <tr><th>Component</th><th>File</th><th>Version</th><th>Location</th><th>Last Updated</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>🤖 Expert Advisor</td>
+          <td style="font-family:monospace;font-size:0.82rem">ClaudMarket_EA.mq5</td>
+          <td><span style="color:var(--green);font-weight:700">v8.1</span></td>
+          <td style="font-size:0.8rem;color:var(--muted)">MQL5\Experts\</td>
+          <td style="font-size:0.8rem;color:var(--muted)">May 2025</td>
+        </tr>
+        <tr>
+          <td>⚡ Webhook Server</td>
+          <td style="font-family:monospace;font-size:0.82rem">webhook_server.py</td>
+          <td><span style="color:var(--blue);font-weight:700">v5.0</span></td>
+          <td style="font-size:0.8rem;color:var(--muted)">Render (cloud)</td>
+          <td style="font-size:0.8rem;color:var(--muted)">May 2025</td>
+        </tr>
+        <tr>
+          <td>🖥️ Command Centre</td>
+          <td style="font-family:monospace;font-size:0.82rem">command_centre.html</td>
+          <td><span style="color:var(--yellow);font-weight:700">v4.0</span></td>
+          <td style="font-size:0.8rem;color:var(--muted)">Desktop (local)</td>
+          <td style="font-size:0.8rem;color:var(--muted)">May 2025</td>
+        </tr>
+        <tr>
+          <td>🤖 Daily Agents</td>
+          <td style="font-family:monospace;font-size:0.82rem">claud_market_daily.py</td>
+          <td><span style="color:var(--orange);font-weight:700">v2.0</span></td>
+          <td style="font-size:0.8rem;color:var(--muted)">GitHub Actions</td>
+          <td style="font-size:0.8rem;color:var(--muted)">May 2025</td>
+        </tr>
+        <tr>
+          <td>📋 Requirements</td>
+          <td style="font-family:monospace;font-size:0.82rem">requirements.txt</td>
+          <td><span style="color:var(--muted);font-weight:700">v1.0</span></td>
+          <td style="font-size:0.8rem;color:var(--muted)">GitHub root</td>
+          <td style="font-size:0.8rem;color:var(--muted)">May 2025</td>
+        </tr>
+        <tr>
+          <td>⚙️ GitHub Actions</td>
+          <td style="font-family:monospace;font-size:0.82rem">daily_report.yml</td>
+          <td><span style="color:var(--muted);font-weight:700">v1.0</span></td>
+          <td style="font-size:0.8rem;color:var(--muted)">.github/workflows/</td>
+          <td style="font-size:0.8rem;color:var(--muted)">May 2025</td>
+        </tr>
+        <tr>
+          <td>📖 Documentation</td>
+          <td style="font-family:monospace;font-size:0.82rem">README.md</td>
+          <td><span style="color:var(--muted);font-weight:700">v2.0</span></td>
+          <td style="font-size:0.8rem;color:var(--muted)">GitHub root</td>
+          <td style="font-size:0.8rem;color:var(--muted)">May 2025</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ─── JavaScript ──────────────────────────────────────────────────────────── -->
+<script>
+const WEBHOOK = "https://claude-market.onrender.com";
+let selectedSym = "GOLD";
+let selectedDir = "BUY";
+let trading_enabled = true;
+
+// ── Navigation ──────────────────────────────────────────────────────────────
+function showPage(id, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + id).classList.add('active');
+  btn.classList.add('active');
+  if(id === 'scanner') loadScannerData();
+}
+
+// ── Clock ────────────────────────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  const sast = new Date(now.getTime() + 2*3600000);
+  const t = sast.toISOString().slice(11,19);
+  document.getElementById('clock').textContent = t + ' SAST';
+  updateMarketHours(sast);
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Market Hours ─────────────────────────────────────────────────────────────
+function updateMarketHours(sast) {
+  const h = sast.getUTCHours();
+  const d = sast.getUTCDay(); // 0=Sun,6=Sat
+  const weekend = d === 0 || d === 6;
+
+  const setMkt = (id, open) => {
+    const el = document.getElementById('mkt-' + id);
+    if(!el) return;
+    el.textContent = open ? '● OPEN' : '● CLOSED';
+    el.className = 'mkt-status ' + (open ? 'mkt-open' : 'mkt-closed');
+  };
+
+  // Metals/Forex: Mon-Fri 02:00-24:00 SAST
+  const metals = !weekend && h >= 2;
+  setMkt('GOLD', metals);
+  setMkt('SILVER', metals);
+
+  // NAS100: Mon-Fri 15:30-22:00 SAST
+  const nas = !weekend && h >= 15 && h < 22;
+  setMkt('NAS100', nas);
+}
+
+// ── Signal Selection ─────────────────────────────────────────────────────────
+function selectSym(sym) {
+  selectedSym = sym;
+  document.querySelectorAll('.sel-sym').forEach(b => b.classList.remove('active'));
+  const mapping = {'GOLD':'sym-GOLD','SILVER':'sym-SILVER','BTCUSD':'sym-BTC','ETHUSD':'sym-ETH','NAS100':'sym-NAS'};
+  const el = document.getElementById(mapping[sym] || 'sym-GOLD');
+  if(el) el.classList.add('active');
+}
+function selectDir(dir) {
+  selectedDir = dir;
+  document.getElementById('dir-BUY').classList.toggle('active', dir === 'BUY');
+  document.getElementById('dir-SELL').classList.toggle('active', dir === 'SELL');
+}
+
+// ── Send Signal ──────────────────────────────────────────────────────────────
+async function sendSignal() {
+  document.getElementById('send-result').textContent = '⏳ Sending...';
+  try {
+    const resp = await fetch(WEBHOOK + '/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker: selectedSym, action: selectedDir, price: '0', secret: 'claude-market-2026' })
+    });
+    const data = await resp.json();
+    const msg = data.status === 'signal_stored'
+      ? `✅ Signal sent: ${selectedSym} ${selectedDir} — Score ${data.score}`
+      : `⚠️ ${data.status}: ${data.reason || JSON.stringify(data)}`;
+    document.getElementById('send-result').textContent = msg;
+    addLog(msg, data.status === 'signal_stored' ? 'ok' : 'warn');
+    document.getElementById('last-signal').textContent = `Last: ${selectedSym} ${selectedDir} @ ${new Date().toLocaleTimeString()}`;
+  } catch(e) {
+    document.getElementById('send-result').textContent = '❌ Send failed: ' + e.message;
+    addLog('Send failed: ' + e.message, 'err');
+  }
+}
+
+// ── Kill Switch ──────────────────────────────────────────────────────────────
+async function toggleKillSwitch() {
+  const endpoint = trading_enabled ? '/trading/stop' : '/trading/resume';
+  try {
+    const resp = await fetch(WEBHOOK + endpoint, { method: 'POST' });
+    const data = await resp.json();
+    trading_enabled = data.trading_enabled;
+    updateKillSwitchUI();
+    addLog(trading_enabled ? '▶ Trading RESUMED' : '⛔ Trading STOPPED', trading_enabled ? 'ok' : 'err');
+  } catch(e) {
+    addLog('Kill switch error: ' + e.message, 'err');
+  }
+}
+function updateKillSwitchUI() {
+  const btn = document.getElementById('killSwitch');
+  const dot = document.getElementById('dot-kill');
+  const lbl = document.getElementById('kill-label');
+  if(trading_enabled) {
+    btn.className = 'kill-switch kill-on';
+    btn.textContent = '🟢 TRADING ACTIVE';
+    dot.className = 'dot green';
+    lbl.textContent = 'Kill Switch OFF';
+  } else {
+    btn.className = 'kill-switch kill-off';
+    btn.textContent = '🔴 TRADING HALTED';
+    dot.className = 'dot red';
+    lbl.textContent = 'Kill Switch ACTIVE';
+  }
+}
+
+// ── Poll Webhook Status ──────────────────────────────────────────────────────
+async function pollWebhook() {
+  try {
+    const resp = await fetch(WEBHOOK + '/');
+    const data = await resp.json();
+    setDot('dot-webhook', 'green');
+    document.getElementById('dot-internet').className = 'dot green';
+
+    // Kill switch sync
+    trading_enabled = data.trading_enabled !== false;
+    updateKillSwitchUI();
+
+    // Signal status
+    const sigEl = document.getElementById('signal-status');
+    if(data.pending_signal) {
+      sigEl.innerHTML = '<span style="color:var(--yellow)">⚡ Signal pending — EA will pick up within 10s</span>';
+      setDot('dot-signal', 'yellow');
+    } else {
+      sigEl.innerHTML = '<span style="color:var(--green)">✅ No pending signal — system idle</span>';
+      setDot('dot-signal', 'green');
+    }
+
+    // Scanner status
+    if(data.last_scan) {
+      setDot('dot-scanner', 'green');
+    }
+
+    document.getElementById('last-update').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    setDot('dot-webhook', 'red');
+    setDot('dot-signal', 'red');
+    addLog('Webhook offline: ' + e.message, 'err');
+  }
+}
+
+// ── Poll MT5 Status ──────────────────────────────────────────────────────────
+async function pollMT5Status() {
+  try {
+    const resp = await fetch(WEBHOOK + '/status');
+    const data = await resp.json();
+    if(!data || !data.balance) { setDot('dot-mt5','red'); return; }
+
+    setDot('dot-mt5', 'green');
+    document.getElementById('ea-badge').textContent = '● MT5 LIVE';
+    document.getElementById('ea-badge').style.background = 'rgba(0,255,136,0.15)';
+    document.getElementById('ea-version').textContent = 'EA v' + (data.version || '8.1');
+    document.getElementById('ea-account').textContent = 'Acct: ' + (data.account || '--');
+    document.getElementById('ea-lastupdate').textContent = 'Last report: ' + (data.timestamp || data.received_at || '--');
+
+    const fmt = n => '$' + parseFloat(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+    document.getElementById('acc-balance').textContent = fmt(data.balance);
+    document.getElementById('acc-equity').textContent  = fmt(data.equity);
+    document.getElementById('acc-margin').textContent  = fmt(data.margin || 0);
+    document.getElementById('acc-free').textContent    = fmt(data.free_margin || 0);
+
+    const pnl = parseFloat(data.daily_pnl || 0);
+    const pnlEl = document.getElementById('acc-pnl');
+    pnlEl.textContent = (pnl >= 0 ? '+' : '') + fmt(pnl);
+    pnlEl.className = 'acc-value ' + (pnl >= 0 ? 'green-num' : 'red-num');
+
+    // Positions
+    renderPositions(data.positions || []);
+  } catch(e) {
+    setDot('dot-mt5','red');
+    document.getElementById('ea-badge').textContent = '● MT5 OFFLINE';
+  }
+}
+
+// ── Render Positions — Visual Trail Cards ────────────────────────────────────
+function renderPositions(positions) {
+  const container = document.getElementById('pos-tbody');
+  document.getElementById('pos-count').textContent = positions.length > 0 ? `(${positions.length})` : '';
+
+  if(!positions.length) {
+    container.innerHTML = '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:20px">No open positions — system watching for signals</td></tr>';
+    return;
+  }
+
+  // Replace table rows with rich cards (span full width)
+  container.innerHTML = `<tr><td colspan="9" style="padding:0">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(480px,1fr));gap:12px;padding:10px 0">
+      ${positions.map(p => buildTradeCard(p)).join('')}
+    </div>
+  </td></tr>`;
+}
+
+function buildTradeCard(p) {
+  const profit   = parseFloat(p.profit || 0);
+  const entry    = parseFloat(p.entry  || 0);
+  const sl       = parseFloat(p.sl     || 0);
+  const tp       = parseFloat(p.tp     || 0);
+  const isBuy    = p.type === 'BUY';
+  const isRange  = (p.comment || '').includes('RANGE');
+  const digs     = entry > 1000 ? 2 : entry > 10 ? 3 : 4;
+  const fmt      = n => n.toFixed(digs);
+
+  // ── Trail level calculation ──────────────────────────────────────────────
+  const slDist   = Math.abs(entry - sl);
+  const tpDist   = Math.abs(tp - entry);
+
+  // How far price has moved from entry toward TP
+  // We estimate current price from profit (approximate)
+  const tickApprox = slDist > 0 ? slDist : tpDist * 0.5;
+  const slRatio  = slDist > 0 ? Math.abs(entry - sl) / slDist : 0; // always starts at 1.0 (original)
+
+  // Recalculate based on current SL vs original SL
+  // L1: SL moved to entry (BE) — sl ≈ entry
+  // L2: SL moved above entry — sl > entry (BUY)
+  // L3: SL trailing ATR — sl significantly above entry
+  let trailLevel = 0;
+  let trailName  = 'NOT ACTIVE';
+  let trailColor = '#64748b';
+  let trailDesc  = 'SL at original level — trade not yet protected';
+
+  if(isBuy) {
+    if(sl >= entry) {
+      if(sl > entry + (tpDist * 0.1)) {
+        trailLevel = 3; trailName = 'L3 — ATR TRAIL';
+        trailColor = '#00ff88';
+        trailDesc  = 'SL trailing ATR behind price — maximum protection';
+      } else if(sl >= entry) {
+        trailLevel = 2; trailName = 'L2 — PROFIT LOCKED';
+        trailColor = '#ffcc00';
+        trailDesc  = 'SL above entry — profit locked in';
+      }
+    } else if(Math.abs(sl - entry) < slDist * 0.1) {
+      trailLevel = 1; trailName = 'L1 — BREAK EVEN';
+      trailColor = '#4fa3ff';
+      trailDesc  = 'SL moved to entry — zero loss guaranteed';
+    }
+  } else { // SELL
+    if(sl <= entry) {
+      if(sl < entry - (tpDist * 0.1)) {
+        trailLevel = 3; trailName = 'L3 — ATR TRAIL';
+        trailColor = '#00ff88';
+        trailDesc  = 'SL trailing ATR behind price — maximum protection';
+      } else if(sl <= entry) {
+        trailLevel = 2; trailName = 'L2 — PROFIT LOCKED';
+        trailColor = '#ffcc00';
+        trailDesc  = 'SL below entry — profit locked in';
+      }
+    } else if(Math.abs(sl - entry) < slDist * 0.1) {
+      trailLevel = 1; trailName = 'L1 — BREAK EVEN';
+      trailColor = '#4fa3ff';
+      trailDesc  = 'SL moved to entry — zero loss guaranteed';
+    }
+  }
+
+  // ── Progress bar calculation ─────────────────────────────────────────────
+  // Bar goes: SL ←────── Entry ──────────────→ TP
+  // We show the full range from original SL to TP
+  const fullRange = slDist + tpDist;
+
+  // Marker positions as % of full bar (SL=0%, Entry=slDist/fullRange, TP=100%)
+  const entryPct = fullRange > 0 ? (slDist / fullRange) * 100 : 50;
+
+  // L1 trigger = 50% of SL distance above entry
+  const l1Pct = fullRange > 0 ? ((slDist + tpDist * 0.33) / fullRange) * 100 : 60;
+  // L2 trigger = 100% of SL distance above entry
+  const l2Pct = fullRange > 0 ? ((slDist + tpDist * 0.66) / fullRange) * 100 : 75;
+  // L3 trigger = 150% of SL distance above entry
+  const l3Pct = Math.min(fullRange > 0 ? ((slDist + tpDist * 0.90) / fullRange) * 100 : 90, 95);
+
+  // Current SL position on bar
+  const slPos = isBuy
+    ? (fullRange > 0 ? (Math.abs(sl - (entry - slDist)) / fullRange) * 100 : 0)
+    : (fullRange > 0 ? (Math.abs(sl - (entry + slDist)) / fullRange) * 100 : 0);
+  const slBarPct = Math.max(0, Math.min(100, slPos));
+
+  // Fill color based on trail level
+  const fillColor = trailLevel === 3 ? '#00ff88' :
+                    trailLevel === 2 ? '#ffcc00' :
+                    trailLevel === 1 ? '#4fa3ff' : '#ef4444';
+
+  // Profit color
+  const pColor = profit >= 0 ? '#00ff88' : '#ff4444';
+  const pSign  = profit >= 0 ? '+' : '';
+
+  return `
+  <div style="background:#1e2736;border:1px solid ${trailColor};border-radius:10px;padding:14px;position:relative">
+
+    <!-- Header row -->
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:1.2rem;font-weight:800">${p.symbol||'--'}</span>
+        <span style="background:${isBuy?'rgba(0,255,136,0.15)':'rgba(255,68,68,0.15)'};color:${isBuy?'#00ff88':'#ff4444'};padding:2px 10px;border-radius:4px;font-size:0.82rem;font-weight:700">${p.type}</span>
+        ${isRange ? '<span style="background:rgba(255,204,0,0.15);color:#ffcc00;padding:2px 8px;border-radius:4px;font-size:0.75rem;font-weight:700">RANGE</span>' : '<span style="background:rgba(167,139,250,0.15);color:#a78bfa;padding:2px 8px;border-radius:4px;font-size:0.75rem;font-weight:700">BB</span>'}
+        <span style="color:#64748b;font-size:0.78rem">#${p.ticket||'--'}</span>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:1.4rem;font-weight:800;color:${pColor}">${pSign}$${Math.abs(profit).toFixed(2)}</div>
+        <div style="font-size:0.75rem;color:#64748b">${parseFloat(p.lots||0).toFixed(2)} lots</div>
+      </div>
+    </div>
+
+    <!-- Trail level badge -->
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+      <div style="width:10px;height:10px;border-radius:50%;background:${trailColor};box-shadow:0 0 6px ${trailColor}"></div>
+      <span style="font-size:0.82rem;font-weight:700;color:${trailColor}">${trailName}</span>
+      <span style="font-size:0.78rem;color:#64748b">— ${trailDesc}</span>
+    </div>
+
+    <!-- Visual Progress Bar -->
+    <div style="margin-bottom:10px">
+      <div style="position:relative;height:28px;background:#0a0e1a;border-radius:6px;overflow:visible;border:1px solid #2d3748">
+
+        <!-- Fill from SL to current SL position -->
+        <div style="position:absolute;left:0;top:0;height:100%;width:${slBarPct}%;background:linear-gradient(90deg,rgba(255,68,68,0.3),${fillColor}40);border-radius:6px;transition:width 0.5s"></div>
+
+        <!-- SL marker (moving) -->
+        <div style="position:absolute;top:-4px;left:${slBarPct}%;transform:translateX(-50%);width:3px;height:36px;background:${fillColor};border-radius:2px;z-index:3" title="Current SL: ${fmt(sl)}">
+          <div style="position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:0.6rem;color:${fillColor};white-space:nowrap;font-weight:700">SL</div>
+        </div>
+
+        <!-- Entry marker -->
+        <div style="position:absolute;top:0;left:${entryPct.toFixed(1)}%;transform:translateX(-50%);width:2px;height:100%;background:#64748b;z-index:2" title="Entry: ${fmt(entry)}">
+          <div style="position:absolute;top:50%;left:6px;transform:translateY(-50%);font-size:0.65rem;color:#64748b;white-space:nowrap">Entry</div>
+        </div>
+
+        <!-- L1 trigger marker -->
+        <div style="position:absolute;top:0;left:${l1Pct.toFixed(1)}%;transform:translateX(-50%);width:1px;height:100%;background:#4fa3ff44;z-index:1">
+          <div style="position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-size:0.6rem;color:#4fa3ff;font-weight:700">L1</div>
+        </div>
+
+        <!-- L2 trigger marker -->
+        <div style="position:absolute;top:0;left:${l2Pct.toFixed(1)}%;transform:translateX(-50%);width:1px;height:100%;background:#ffcc0044;z-index:1">
+          <div style="position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-size:0.6rem;color:#ffcc00;font-weight:700">L2</div>
+        </div>
+
+        <!-- L3 trigger marker -->
+        <div style="position:absolute;top:0;left:${l3Pct.toFixed(1)}%;transform:translateX(-50%);width:1px;height:100%;background:#00ff8844;z-index:1">
+          <div style="position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-size:0.6rem;color:#00ff88;font-weight:700">L3</div>
+        </div>
+
+        <!-- TP marker -->
+        <div style="position:absolute;top:0;right:0;width:3px;height:100%;background:#00ff88;border-radius:0 6px 6px 0">
+          <div style="position:absolute;top:50%;right:6px;transform:translateY(-50%);font-size:0.65rem;color:#00ff88;white-space:nowrap">TP</div>
+        </div>
+      </div>
+
+      <!-- Bar labels -->
+      <div style="display:flex;justify-content:space-between;margin-top:20px;font-size:0.72rem;color:#64748b">
+        <span style="color:#ff4444">SL ${fmt(sl)}</span>
+        <span style="color:#4fa3ff">L1 BE</span>
+        <span style="color:#ffcc00">L2 LOCK</span>
+        <span style="color:#00ff88">L3 TRAIL</span>
+        <span style="color:#00ff88">TP ${fmt(tp)}</span>
+      </div>
+    </div>
+
+    <!-- Price details row -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px">
+      <div style="background:#111827;border-radius:6px;padding:6px;text-align:center">
+        <div style="font-size:0.65rem;color:#64748b;margin-bottom:2px">ENTRY</div>
+        <div style="font-size:0.82rem;font-weight:700">${fmt(entry)}</div>
+      </div>
+      <div style="background:#111827;border-radius:6px;padding:6px;text-align:center">
+        <div style="font-size:0.65rem;color:#ff4444;margin-bottom:2px">STOP LOSS</div>
+        <div style="font-size:0.82rem;font-weight:700;color:#ff4444">${fmt(sl)}</div>
+      </div>
+      <div style="background:#111827;border-radius:6px;padding:6px;text-align:center">
+        <div style="font-size:0.65rem;color:#00ff88;margin-bottom:2px">TAKE PROFIT</div>
+        <div style="font-size:0.82rem;font-weight:700;color:#00ff88">${fmt(tp)}</div>
+      </div>
+      <div style="background:#111827;border-radius:6px;padding:6px;text-align:center">
+        <div style="font-size:0.65rem;color:#64748b;margin-bottom:2px">RISK</div>
+        <div style="font-size:0.82rem;font-weight:700;color:#ffcc00">$${(Math.abs(entry-sl)*parseFloat(p.lots||0.01)*100).toFixed(0)}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── Scanner Page ─────────────────────────────────────────────────────────────
+async function loadScannerData() {
+  try {
+    const resp = await fetch(WEBHOOK + '/scanner/results');
+    const data = await resp.json();
+
+    document.getElementById('scan-last').textContent = data.last_run
+      ? new Date(data.last_run).toLocaleString() : 'Not yet';
+    document.getElementById('scan-next').textContent = data.next_run
+      ? new Date(data.next_run).toLocaleString() : '--';
+
+    // Global winner
+    if(data.global_winner && data.global_winner.symbol) {
+      const w = data.global_winner;
+      document.getElementById('global-winner-card').style.display = 'block';
+      document.getElementById('no-winner').style.display = 'none';
+      document.getElementById('win-sym').textContent = w.symbol + ' ' + (w.action||'');
+      document.getElementById('win-score').textContent = (w.score||'?') + '/5';
+      document.getElementById('win-meta').textContent =
+        `Group: ${w.group||'--'} | Support: ${w.support||'--'} | Resistance: ${w.resistance||'--'}`;
+      document.getElementById('win-reason').textContent = w.reason || '';
+      document.getElementById('win-conf').textContent = '🎯 Confidence: ' + (w.confidence||'--');
+    }
+
+    // Group cards
+    const gc = document.getElementById('group-cards');
+    const stage2 = data.stage2 || {};
+    const stage1 = data.stage1 || {};
+    const groups = ['Forex Majors','Forex Minors','Indices','Commodities','Crypto','SA & Emerging'];
+    gc.innerHTML = groups.map(g => {
+      const winner = stage2[g] || null;
+      const top5   = stage1[g] || [];
+      return `<div class="group-card">
+        <div class="group-title">${g}</div>
+        ${winner
+          ? `<div class="group-winner">★ ${winner.symbol} ${winner.action||''} <span style="font-size:0.8rem;color:var(--muted)">(${winner.confidence||'--'})</span></div>
+             <div style="font-size:0.78rem;color:var(--muted);margin-bottom:8px">${winner.reason||''}</div>`
+          : '<div class="group-winner" style="color:var(--muted)">No winner yet</div>'}
+        <div class="group-top5">
+          ${top5.map(a => `<span class="asset-chip ${winner && winner.symbol===a ? 'winner':''}">${a}</span>`).join('')}
+        </div>
+      </div>`;
+    }).join('');
+
+    // History
+    const hist = data.history || [];
+    const hEl = document.getElementById('scan-history');
+    if(hist.length) {
+      hEl.innerHTML = hist.map(h =>
+        `<div class="history-row">
+          <span class="badge ${h.action==='BUY'?'buy':'sell'}">${h.action}</span>
+          <span style="font-weight:700">${h.symbol}</span>
+          <span style="color:var(--yellow)">S:${h.score}/5</span>
+          <span style="color:var(--muted)">${h.type}</span>
+          <span style="color:var(--muted);font-size:0.78rem">${new Date(h.time).toLocaleTimeString()}</span>
+        </div>`
+      ).join('');
+    } else {
+      hEl.textContent = 'No history yet';
+    }
+
+    // Rotation
+    const trading_resp = await fetch(WEBHOOK + '/trading/status');
+    const tdata = await trading_resp.json();
+    document.getElementById('rotation-list').textContent =
+      (tdata.recently_traded || []).join(', ') || 'None';
+
+  } catch(e) {
+    addLog('Scanner data load failed: ' + e.message, 'err');
+  }
+}
+
+async function triggerScan() {
+  addLog('Manual scan triggered — takes ~60 seconds', 'info');
+
+  // Reset all pills
+  ['pill1','pill2','pill3','pill4'].forEach(id => {
+    document.getElementById(id).className = 'stage-pill';
+  });
+
+  // Trigger the scan first
+  try {
+    await fetch(WEBHOOK + '/scanner/run', { method: 'POST' });
+    addLog('Scanner started on server...', 'info');
+  } catch(e) {
+    addLog('Scan trigger failed: ' + e.message, 'err');
+    return;
+  }
+
+  // Animate stage pills based on expected timing
+  document.getElementById('pill1').className = 'stage-pill active';
+
+  setTimeout(() => {
+    document.getElementById('pill1').className = 'stage-pill done';
+    document.getElementById('pill2').className = 'stage-pill active';
+    addLog('Stage 1 — top 5 per group completing...', 'info');
+  }, 22000);
+
+  setTimeout(() => {
+    document.getElementById('pill2').className = 'stage-pill done';
+    document.getElementById('pill3').className = 'stage-pill active';
+    addLog('Stage 2 — group winners completing...', 'info');
+  }, 40000);
+
+  setTimeout(() => {
+    document.getElementById('pill3').className = 'stage-pill done';
+    document.getElementById('pill4').className = 'stage-pill active';
+    addLog('Stage 3 — global champion completing...', 'info');
+  }, 55000);
+
+  // Start checking for results after 60 seconds
+  setTimeout(() => {
+    addLog('Checking for results...', 'info');
+    let attempts = 0;
+    const check = setInterval(async () => {
+      attempts++;
+      try {
+        const r = await fetch(WEBHOOK + '/scanner/results');
+        const d = await r.json();
+        if(d.global_winner && d.global_winner.symbol) {
+          clearInterval(check);
+          document.getElementById('pill4').className = 'stage-pill done';
+          addLog('🏆 Winner: ' + d.global_winner.symbol + ' ' + d.global_winner.action + ' Score:' + d.global_winner.score + '/5', 'ok');
+          loadScannerData();
+        } else if(attempts >= 6) {
+          clearInterval(check);
+          addLog('Scan done — click 🔄 Refresh Data to see results', 'info');
+          loadScannerData();
+        }
+      } catch(e) {
+        addLog('Check failed: ' + e.message, 'err');
+      }
+    }, 10000);
+  }, 60000);
+}
+
+// ── Utilities ────────────────────────────────────────────────────────────────
+function setDot(id, color) {
+  document.getElementById(id).className = 'dot ' + color;
+}
+
+function addLog(msg, type='info') {
+  const box = document.getElementById('logbox');
+  const types = { ok:'log-ok', err:'log-err', info:'log-info', warn:'log-warn' };
+  const t = new Date().toLocaleTimeString();
+  const div = document.createElement('div');
+  div.className = 'log-entry';
+  div.innerHTML = `<span class="log-time">${t}</span><span class="${types[type]||'log-info'}">${msg}</span>`;
+  box.insertBefore(div, box.firstChild);
+  if(box.children.length > 60) box.removeChild(box.lastChild);
+}
+
+// ── Polling Loops ────────────────────────────────────────────────────────────
+pollWebhook();
+pollMT5Status();
+setInterval(pollWebhook,   30000);  // every 30s
+setInterval(pollMT5Status, 15000);  // every 15s
+
+addLog('Command Centre v4.2 started', 'ok');
+addLog('Connecting to ' + WEBHOOK, 'info');
+</script>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- PAGE 5: HOW IT WORKS                                                       -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="page" id="page-howto">
+  <h2 style="font-size:1.3rem;margin-bottom:4px">📖 How It Works</h2>
+  <div style="font-size:0.82rem;color:var(--muted);margin-bottom:16px">Two views — trade flow and full system map. Click any box for more detail.</div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+
+    <!-- LEFT: Trade Flow -->
+    <div class="card">
+      <div class="card-title" style="margin-bottom:12px">⚡ How a trade is placed automatically</div>
+
+      <!-- Step 1 -->
+      <div style="display:flex;gap:10px;margin-bottom:8px;align-items:flex-start">
+        <div style="background:rgba(79,163,255,0.2);color:var(--blue);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.82rem;flex-shrink:0">1</div>
+        <div>
+          <div style="font-weight:700;font-size:0.88rem;color:var(--blue)">TradingView detects signal</div>
+          <div style="font-size:0.78rem;color:var(--muted)">BB Breakout v7.0 fires on daily candle close — sends BUY or SELL to webhook</div>
+        </div>
+        <div style="font-size:0.72rem;color:var(--muted);white-space:nowrap;margin-left:auto">instant</div>
+      </div>
+      <div style="margin-left:13px;width:1px;height:12px;background:var(--border)"></div>
+
+      <!-- Step 2 -->
+      <div style="display:flex;gap:10px;margin-bottom:8px;align-items:flex-start">
+        <div style="background:rgba(0,255,136,0.15);color:var(--green);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.82rem;flex-shrink:0">2</div>
+        <div>
+          <div style="font-weight:700;font-size:0.88rem;color:var(--green)">Webhook Server receives</div>
+          <div style="font-size:0.78rem;color:var(--muted)">claude-market.onrender.com/webhook — checks secret key, stores signal in memory</div>
+        </div>
+        <div style="font-size:0.72rem;color:var(--muted);white-space:nowrap;margin-left:auto">&lt;1s</div>
+      </div>
+      <div style="margin-left:13px;width:1px;height:12px;background:var(--border)"></div>
+
+      <!-- Step 3 -->
+      <div style="display:flex;gap:10px;margin-bottom:8px;align-items:flex-start">
+        <div style="background:rgba(167,139,250,0.2);color:var(--purple);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.82rem;flex-shrink:0">3</div>
+        <div>
+          <div style="font-weight:700;font-size:0.88rem;color:var(--purple)">Claude AI validates</div>
+          <div style="font-size:0.78rem;color:var(--muted)">Scores signal 1–5 based on market conditions. Score below 3 = rejected automatically</div>
+        </div>
+        <div style="font-size:0.72rem;color:var(--muted);white-space:nowrap;margin-left:auto">1–2s</div>
+      </div>
+      <div style="margin-left:13px;width:1px;height:12px;background:var(--border)"></div>
+
+      <!-- Step 4 -->
+      <div style="display:flex;gap:10px;margin-bottom:8px;align-items:flex-start">
+        <div style="background:rgba(0,255,136,0.15);color:var(--green);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.82rem;flex-shrink:0">4</div>
+        <div>
+          <div style="font-weight:700;font-size:0.88rem;color:var(--green)">EA polls for signal</div>
+          <div style="font-size:0.78rem;color:var(--muted)">EA asks webhook every 10 seconds — receives symbol, action, score, signal type</div>
+        </div>
+        <div style="font-size:0.72rem;color:var(--muted);white-space:nowrap;margin-left:auto">max 10s</div>
+      </div>
+      <div style="margin-left:13px;width:1px;height:12px;background:var(--border)"></div>
+
+      <!-- Step 5 -->
+      <div style="display:flex;gap:10px;margin-bottom:8px;align-items:flex-start">
+        <div style="background:rgba(0,255,136,0.15);color:var(--green);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.82rem;flex-shrink:0">5</div>
+        <div>
+          <div style="font-weight:700;font-size:0.88rem;color:var(--green)">EA calculates trade parameters</div>
+          <div style="font-size:0.78rem;color:var(--muted)">Lot size = 2% risk · SL per asset (GOLD=100, BTC=200 pips) · TP = SL × 1.5 · Filling mode auto-detected</div>
+        </div>
+        <div style="font-size:0.72rem;color:var(--muted);white-space:nowrap;margin-left:auto">instant</div>
+      </div>
+      <div style="margin-left:13px;width:1px;height:12px;background:var(--border)"></div>
+
+      <!-- Step 6 -->
+      <div style="display:flex;gap:10px;margin-bottom:8px;align-items:flex-start">
+        <div style="background:rgba(0,255,136,0.15);color:var(--green);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.82rem;flex-shrink:0">6</div>
+        <div>
+          <div style="font-weight:700;font-size:0.88rem;color:var(--green)">Trade placed on MT5</div>
+          <div style="font-size:0.78rem;color:var(--muted)">OrderSend fired — ticket issued — SL and TP set automatically — email notification sent</div>
+        </div>
+        <div style="font-size:0.72rem;color:var(--muted);white-space:nowrap;margin-left:auto">instant</div>
+      </div>
+      <div style="margin-left:13px;width:1px;height:12px;background:var(--border)"></div>
+
+      <!-- Step 7 -->
+      <div style="display:flex;gap:10px;margin-bottom:12px;align-items:flex-start">
+        <div style="background:rgba(255,204,0,0.2);color:var(--yellow);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.82rem;flex-shrink:0">7</div>
+        <div>
+          <div style="font-weight:700;font-size:0.88rem;color:var(--yellow)">Trailing stop activates</div>
+          <div style="font-size:0.78rem;color:var(--muted)">L1: SL → entry (break-even) · L2: locks profit · L3: ATR trails behind price automatically</div>
+        </div>
+        <div style="font-size:0.72rem;color:var(--muted);white-space:nowrap;margin-left:auto">ongoing</div>
+      </div>
+
+      <!-- Total time banner -->
+      <div style="background:rgba(0,255,136,0.1);border:1px solid rgba(0,255,136,0.3);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:0.82rem;font-weight:700;color:var(--green)">Total time: signal → open trade</div>
+        <div style="font-size:1.4rem;font-weight:800;color:var(--green)">under 15 seconds</div>
+        <div style="font-size:0.75rem;color:var(--muted)">You do nothing — the system handles everything</div>
+      </div>
+    </div>
+
+    <!-- RIGHT: System Map + API Keys -->
+    <div style="display:flex;flex-direction:column;gap:14px">
+
+      <!-- API Keys explained -->
+      <div class="card">
+        <div class="card-title" style="margin-bottom:10px">🔑 API Keys — What Goes Where</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-bottom:10px">You only manage 2 keys. Everything else is automatic.</div>
+
+        <!-- Anthropic Key -->
+        <div style="background:rgba(167,139,250,0.1);border:1px solid rgba(167,139,250,0.3);border-radius:8px;padding:10px;margin-bottom:8px">
+          <div style="font-weight:700;font-size:0.88rem;color:var(--purple);margin-bottom:4px">ANTHROPIC_API_KEY</div>
+          <div style="font-size:0.78rem;color:var(--muted);margin-bottom:6px">Created at: <span style="color:var(--blue)">console.anthropic.com/settings/keys</span></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <span style="background:rgba(0,255,136,0.15);color:var(--green);padding:3px 10px;border-radius:4px;font-size:0.75rem">→ Render Environment</span>
+            <span style="background:rgba(100,116,139,0.2);color:var(--muted);padding:3px 10px;border-radius:4px;font-size:0.75rem">→ GitHub Secrets</span>
+          </div>
+          <div style="font-size:0.72rem;color:var(--muted);margin-top:4px">Starts with: sk-ant-api03-... · No spaces · Same key in both places</div>
+        </div>
+
+        <!-- Gmail App Password -->
+        <div style="background:rgba(251,146,60,0.1);border:1px solid rgba(251,146,60,0.3);border-radius:8px;padding:10px;margin-bottom:8px">
+          <div style="font-weight:700;font-size:0.88rem;color:var(--orange);margin-bottom:4px">EMAIL_PASS (Gmail App Password)</div>
+          <div style="font-size:0.78rem;color:var(--muted);margin-bottom:6px">Created at: <span style="color:var(--blue)">myaccount.google.com → Security → App passwords</span></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <span style="background:rgba(100,116,139,0.2);color:var(--muted);padding:3px 10px;border-radius:4px;font-size:0.75rem">→ GitHub Secrets only</span>
+          </div>
+          <div style="font-size:0.72rem;color:var(--muted);margin-top:4px">16 characters · Remove all spaces · NOT your normal Gmail password</div>
+        </div>
+
+        <!-- No key needed -->
+        <div style="background:rgba(0,255,136,0.05);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <div style="font-weight:700;font-size:0.82rem;color:var(--muted);margin-bottom:6px">No API key needed for:</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <span style="background:rgba(79,163,255,0.1);color:var(--blue);padding:3px 10px;border-radius:4px;font-size:0.75rem">TradingView — just webhook URL</span>
+            <span style="background:rgba(0,255,136,0.1);color:var(--green);padding:3px 10px;border-radius:4px;font-size:0.75rem">MT5 — just EA file</span>
+            <span style="background:rgba(167,139,250,0.1);color:var(--purple);padding:3px 10px;border-radius:4px;font-size:0.75rem">Command Centre — reads webhook</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dual Strategy explained -->
+      <div class="card">
+        <div class="card-title" style="margin-bottom:10px">📈 Dual Strategy — Profits in all markets</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div style="background:rgba(79,163,255,0.1);border:1px solid rgba(79,163,255,0.3);border-radius:8px;padding:10px">
+            <div style="font-weight:700;font-size:0.85rem;color:var(--blue);margin-bottom:4px">BB Breakout</div>
+            <div style="font-size:0.75rem;color:var(--muted);margin-bottom:4px">For trending markets (30% of time)</div>
+            <div style="font-size:0.75rem;color:var(--muted)">TradingView fires → trail stop → big profit target</div>
+          </div>
+          <div style="background:rgba(255,204,0,0.1);border:1px solid rgba(255,204,0,0.3);border-radius:8px;padding:10px">
+            <div style="font-weight:700;font-size:0.85rem;color:var(--yellow);margin-bottom:4px">Range Scanner</div>
+            <div style="font-size:0.75rem;color:var(--muted);margin-bottom:4px">For sideways markets (70% of time)</div>
+            <div style="font-size:0.75rem;color:var(--muted)">Scanner finds range → buy support / sell resistance</div>
+          </div>
+        </div>
+        <div style="text-align:center;margin-top:10px;font-size:0.82rem;color:var(--green);font-weight:700">Combined = profitable in 100% of market conditions</div>
+      </div>
+
+      <!-- Trail levels quick ref -->
+      <div class="card">
+        <div class="card-title" style="margin-bottom:10px">🛡️ Trailing Stop Levels — Quick Reference</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="background:rgba(79,163,255,0.2);color:var(--blue);padding:3px 10px;border-radius:4px;font-size:0.78rem;font-weight:700;min-width:80px;text-align:center">L1 — B/E</span>
+            <span style="font-size:0.78rem;color:var(--muted)">Price up 50% of SL distance → SL moves to entry → zero loss guaranteed</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="background:rgba(255,204,0,0.2);color:var(--yellow);padding:3px 10px;border-radius:4px;font-size:0.78rem;font-weight:700;min-width:80px;text-align:center">L2 — LOCK</span>
+            <span style="font-size:0.78rem;color:var(--muted)">Price up 100% → SL locks in 25% of expected profit</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="background:rgba(0,255,136,0.2);color:var(--green);padding:3px 10px;border-radius:4px;font-size:0.78rem;font-weight:700;min-width:80px;text-align:center">L3 — TRAIL</span>
+            <span style="font-size:0.78rem;color:var(--muted)">Price up 150% → SL trails 1×ATR behind price continuously</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
