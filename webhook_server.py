@@ -1,510 +1,413 @@
 """
-CLAUDE-MARKET WEBHOOK SERVER v4.0
-====================================
-NEW: Automatic Range Scanner (every 30 minutes)
-  → Asks Claude AI if each asset is ranging or trending
-  → If ranging: auto-generates BUY at support / SELL at resistance
-  → EA picks it up within 10 seconds — fully automatic
-
-NEW: Global Kill Switch
-  GET /trading/stop   → stops ALL trading instantly
-  GET /trading/resume → resumes ALL trading
-  GET /trading/status → current state
-
-All previous features:
-  POST /webhook    → TradingView BB signals
-  GET  /signal     → EA polls every 10s
-  POST /status     → EA reports live data
-  GET  /status     → Command Centre reads live data
-
-Account: 107072723 — Lukas Ferreira — Pretoria 🇿🇦
+Claude-Market Webhook Server v5.0
+Lukas Ferreira - Pretoria ZA
+Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
 """
 
-import os, json, smtplib, threading, time, anthropic
-from datetime import datetime, timezone, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask, request, jsonify
+import anthropic
+import threading
+import time
+import json
+from datetime import datetime, timedelta
+import os
 
-SAST = timezone(timedelta(hours=2))
+app = Flask(__name__)
+client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
-# ── GLOBAL STATE ──────────────────────────────────────────────────
-pending_signal   = None
-signal_lock      = threading.Lock()
-trading_enabled  = True          # KILL SWITCH
-trading_lock     = threading.Lock()
-
-account_status   = {
-    "balance":0,"equity":0,"margin":0,"free_margin":0,
-    "daily_pnl":0,"leverage":0,"positions":[],"pos_count":0,
-    "ea_version":"unknown","account":"107072723",
-    "server":"Ava-Demo 1-MT5","last_update":"Never","connected":False
+# ─── State ────────────────────────────────────────────────────────────────────
+pending_signal   = None          # Signal waiting for EA to pick up
+trading_enabled  = True          # Kill switch
+mt5_status       = {}            # Latest data posted by EA
+scan_results     = {             # Scanner intelligence data
+    "last_run": None,
+    "next_run": None,
+    "stage1": {},                # {group: [top5 assets]}
+    "stage2": {},                # {group: winner}
+    "global_winner": None,
+    "history": []                # Last 20 scan winners
 }
-status_lock = threading.Lock()
+recently_traded  = []            # Assets traded in last 24h (rotation guard)
+scan_lock        = threading.Lock()
 
-range_scanner = {
-    "last_run":    "Never",
-    "next_run":    "In 30 minutes",
-    "last_signal": "None",
-    "signals_today": 0,
-    "status":      "Starting...",
-    "results":     {}
+# ─── Asset Universe (54 assets across 6 groups) ───────────────────────────────
+ASSET_GROUPS = {
+    "Forex Majors":  ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURGBP","EURJPY"],
+    "Forex Minors":  ["GBPJPY","AUDJPY","CADJPY","CHFJPY","EURAUD","EURNZD","GBPAUD","AUDCAD","NZDCAD"],
+    "Indices":       ["NAS100","US500","US30","GER40","UK100","JPN225","AUS200","FRA40","HKG50"],
+    "Commodities":   ["GOLD","SILVER","USOIL","COPPER","NATGAS","PLATINUM","PALLADIUM","WHEAT","COFFEE"],
+    "Crypto":        ["BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOTUSD","AVAXUSD","LINKUSD"],
+    "SA & Emerging": ["USDZAR","EURZAR","GBPZAR","XAUUSD","USDMXN","USDBRL","USDTRY","USDCNH"]
 }
-scanner_lock = threading.Lock()
 
-# ── ENV VARS ──────────────────────────────────────────────────────
-GMAIL_USER    = os.environ.get("GMAIL_USER",        "")
-GMAIL_PASS    = os.environ.get("GMAIL_PASS",        "")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-SECRET        = os.environ.get("WEBHOOK_SECRET",    "claude-market-2026")
+# ─── Health Check ─────────────────────────────────────────────────────────────
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({
+        "service": "Claude-Market Webhook Server",
+        "version": "5.0",
+        "developer": "Lukas Ferreira - Pretoria ZA",
+        "trading_enabled": trading_enabled,
+        "pending_signal": pending_signal is not None,
+        "last_scan": scan_results["last_run"],
+        "next_scan": scan_results["next_run"],
+        "assets_monitored": 54,
+        "groups": list(ASSET_GROUPS.keys()),
+        "mt5_connected": bool(mt5_status.get("timestamp")),
+        "timestamp": datetime.utcnow().isoformat()
+    })
 
-ASSETS = ["GOLD","SILVER","BTCUSD","ETHUSD","NAS100"]
-
-client = anthropic.Anthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
-
-
-# ── REQUEST HANDLER ───────────────────────────────────────────────
-class Handler(BaseHTTPRequestHandler):
-
-    def log_message(self, format, *args):
-        print(f"[{datetime.now(SAST).strftime('%H:%M:%S')}] {format % args}")
-
-    def send_json(self, code, data):
-        body = json.dumps(data, indent=2).encode()
-        self.send_response(code)
-        self.send_header("Content-Type",   "application/json")
-        self.send_header("Content-Length",  len(body))
-        self.send_header("Access-Control-Allow-Origin",  "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        global pending_signal, trading_enabled
-        now = datetime.now(SAST).strftime("%H:%M SAST — %d %b %Y")
-
-        # ── HEALTH ────────────────────────────────────────────────
-        if self.path in ("/", "/health"):
-            with trading_lock:
-                te = trading_enabled
-            self.send_json(200, {
-                "status":          "Claude-Market Webhook Server v4.0",
-                "time_sast":       now,
-                "version":         "4.0",
-                "account":         "107072723 — Lukas Ferreira",
-                "trading_enabled": te,
-                "pending_signal":  pending_signal is not None,
-                "ea_connected":    account_status["connected"],
-                "range_scanner":   range_scanner["status"]
-            })
-
-        # ── EA POLLS SIGNAL ───────────────────────────────────────
-        elif self.path == "/signal":
-            with trading_lock:
-                te = trading_enabled
-            if not te:
-                self.send_json(200, {"signal": False, "reason": "Trading stopped by kill switch"})
-                return
-            with signal_lock:
-                if pending_signal:
-                    self.send_json(200, {
-                        "signal": True,
-                        "symbol": pending_signal["symbol"],
-                        "action": pending_signal["action"],
-                        "reason": pending_signal["reason"],
-                        "score":  pending_signal["score"],
-                        "type":   pending_signal.get("type", "BB"),
-                        "time":   pending_signal["time"]
-                    })
-                else:
-                    self.send_json(200, {"signal": False})
-
-        # ── SIGNAL CLEAR ──────────────────────────────────────────
-        elif self.path == "/signal/clear":
-            with signal_lock:
-                cleared        = pending_signal is not None
-                pending_signal = None
-            self.send_json(200, {"cleared": cleared, "message": "Ready for next signal"})
-
-        # ── LIVE ACCOUNT DATA ─────────────────────────────────────
-        elif self.path == "/status":
-            with status_lock:
-                data = dict(account_status)
-            with trading_lock:
-                data["trading_enabled"] = trading_enabled
-            with scanner_lock:
-                data["range_scanner"] = dict(range_scanner)
-            self.send_json(200, data)
-
-        # ── KILL SWITCH — STOP ────────────────────────────────────
-        elif self.path == "/trading/stop":
-            with trading_lock:
-                trading_enabled = False
-            msg = f"🔴 ALL TRADING STOPPED — {now}"
-            print(msg)
-            self.send_json(200, {"trading_enabled": False, "message": msg})
-
-        # ── KILL SWITCH — RESUME ──────────────────────────────────
-        elif self.path == "/trading/resume":
-            with trading_lock:
-                trading_enabled = True
-            msg = f"🟢 TRADING RESUMED — {now}"
-            print(msg)
-            self.send_json(200, {"trading_enabled": True, "message": msg})
-
-        # ── TRADING STATUS ────────────────────────────────────────
-        elif self.path == "/trading/status":
-            with trading_lock:
-                te = trading_enabled
-            with scanner_lock:
-                rs = dict(range_scanner)
-            self.send_json(200, {
-                "trading_enabled": te,
-                "status":          "RUNNING" if te else "STOPPED",
-                "range_scanner":   rs
-            })
-
-        else:
-            self.send_json(404, {"error": "Not found"})
-
-    def do_POST(self):
-        global pending_signal
-
-        length = int(self.headers.get("Content-Length", 0))
-        raw    = self.rfile.read(length)
-        try:
-            data = json.loads(raw)
-        except Exception as e:
-            self.send_json(400, {"error": f"Invalid JSON: {e}"}); return
-
-        # ── EA STATUS REPORT ──────────────────────────────────────
-        if self.path == "/status":
-            if data.get("secret") != SECRET:
-                self.send_json(403, {"error": "Invalid secret"}); return
-            now_str = datetime.now(SAST).strftime("%H:%M:%S SAST")
-            with status_lock:
-                account_status.update({
-                    "balance":    data.get("balance",    0),
-                    "equity":     data.get("equity",     0),
-                    "margin":     data.get("margin",     0),
-                    "free_margin":data.get("free_margin",0),
-                    "daily_pnl":  data.get("daily_pnl",  0),
-                    "leverage":   data.get("leverage",   0),
-                    "positions":  data.get("positions",  []),
-                    "pos_count":  data.get("pos_count",  0),
-                    "ea_version": data.get("ea_version", "unknown"),
-                    "last_update":now_str,
-                    "connected":  True
-                })
-            print(f"Status: Bal=${data.get('balance',0):.2f} Pos:{data.get('pos_count',0)}")
-            self.send_json(200, {"status": "updated", "time": now_str})
-            return
-
-        # ── TRADINGVIEW WEBHOOK ───────────────────────────────────
-        if self.path == "/webhook":
-            with trading_lock:
-                te = trading_enabled
-            if not te:
-                self.send_json(200, {
-                    "status": "rejected",
-                    "reason": "Trading stopped by kill switch — use /trading/resume to restart"
-                }); return
-
-            if data.get("secret") != SECRET:
-                self.send_json(403, {"error": "Invalid secret"}); return
-
-            ticker = str(data.get("ticker", "")).upper().strip()
-            action = str(data.get("action", "BUY")).upper().strip()
-            price  = str(data.get("price",  "0"))
-            sig_type = str(data.get("type", "BB"))
-
-            if not ticker:
-                self.send_json(400, {"error": "ticker required"}); return
-            if action not in ("BUY","SELL"):
-                self.send_json(400, {"error": "action must be BUY or SELL"}); return
-
-            sym   = resolve_symbol(ticker)
-            score = 4
-            reason = f"{sig_type} signal"
-
-            if client:
-                try:
-                    score, reason = validate_with_claude(sym, action, price, sig_type)
-                except Exception as e:
-                    print(f"Claude validation error: {e}")
-
-            if score < 4:
-                self.send_json(200, {"status":"rejected","score":score,"reason":reason}); return
-
-            now_str = datetime.now(SAST).strftime("%Y.%m.%d %H:%M:%S")
-            with signal_lock:
-                pending_signal = {
-                    "symbol": sym, "action": action, "reason": reason,
-                    "score": score, "type": sig_type, "time": now_str
-                }
-            print(f"Signal stored: {sym} {action} {score}/5 [{sig_type}]")
-
-            if GMAIL_USER and GMAIL_PASS:
-                threading.Thread(target=send_email,
-                    args=(sym,action,price,score,reason,sig_type),daemon=True).start()
-
-            self.send_json(200, {
-                "status": "signal_stored", "symbol": sym,
-                "action": action, "score": f"{score}/5",
-                "reason": reason, "type": sig_type,
-                "message": "EA picks up within 10 seconds"
-            })
-            return
-
-        self.send_json(404, {"error": "Not found"})
-
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin",  "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-
-
-# ── AUTOMATIC RANGE SCANNER ───────────────────────────────────────
-# Runs every 30 minutes in background
-# Asks Claude AI if each asset is ranging or trending
-# If ranging → auto-generates signal → EA trades it
-def range_scanner_loop():
-    print("🔭 Range Scanner started — runs every 30 minutes")
-    time.sleep(60)  # Wait 1 minute after startup before first scan
-
-    while True:
-        try:
-            run_range_scan()
-        except Exception as e:
-            print(f"Range scanner error: {e}")
-        time.sleep(1800)  # 30 minutes
-
-
-def run_range_scan():
+# ─── TradingView Webhook ───────────────────────────────────────────────────────
+@app.route("/webhook", methods=["POST"])
+def webhook():
     global pending_signal
+    try:
+        data = request.get_json(force=True)
+        if not data:
+            return jsonify({"error": "No JSON payload"}), 400
 
-    with trading_lock:
-        te = trading_enabled
-    if not te:
-        print("Range scanner skipped — trading stopped")
-        return
+        secret = data.get("secret", "")
+        if secret != "claude-market-2026":
+            return jsonify({"error": "Invalid secret"}), 401
 
-    now_str = datetime.now(SAST).strftime("%H:%M SAST %d %b %Y")
-    print(f"🔭 Range scan starting — {now_str}")
+        symbol = str(data.get("ticker", data.get("symbol", ""))).upper().strip()
+        action = str(data.get("action", "BUY")).upper().strip()
+        price  = data.get("price", "0")
 
-    with scanner_lock:
-        range_scanner["status"]   = f"Scanning... {now_str}"
-        range_scanner["last_run"] = now_str
+        if not symbol:
+            return jsonify({"error": "Missing symbol"}), 400
+        if action not in ["BUY", "SELL"]:
+            return jsonify({"error": f"Invalid action: {action}"}), 400
 
-    if not client:
-        print("No Claude client — skipping range scan")
-        return
+        if not trading_enabled:
+            return jsonify({"status": "blocked", "reason": "Kill switch active"}), 200
 
-    # Check if signal already pending — don't overwrite
-    with signal_lock:
-        if pending_signal:
-            print("Range scan: signal already pending — skipping")
-            return
+        score = _claude_validate(symbol, action, price, "BB")
+        if score < 3:
+            return jsonify({"status": "rejected", "reason": "Score too low", "score": score}), 200
 
-    prompt = f"""You are the Claude-Market Range Scanner — an automatic trading agent.
-Current time: {now_str}
+        pending_signal = {
+            "symbol": symbol,
+            "action": action,
+            "price": str(price),
+            "score": str(score),
+            "signal_type": "BB_BREAKOUT",
+            "source": "tradingview",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        _add_to_history(symbol, action, score, "BB")
+        print(f"[SIGNAL] TradingView → {symbol} {action} Score:{score}/5")
 
-Analyse each asset for RANGING (sideways) vs TRENDING market conditions.
+        return jsonify({
+            "status": "signal_stored",
+            "symbol": symbol,
+            "action": action,
+            "score": f"{score}/5",
+            "message": "EA will poll and trade within 10 seconds"
+        })
+    except Exception as e:
+        print(f"[ERROR] /webhook: {e}")
+        return jsonify({"error": str(e)}), 500
 
-Assets: GOLD, SILVER, BTCUSD, ETHUSD, NAS100
+# ─── EA Signal Poll ────────────────────────────────────────────────────────────
+@app.route("/signal", methods=["GET"])
+def get_signal():
+    global pending_signal
+    if not pending_signal:
+        return jsonify({"signal": False})
+    sig = pending_signal
+    pending_signal = None        # Clear once delivered
+    print(f"[SIGNAL] Delivered to EA: {sig['symbol']} {sig['action']}")
+    return jsonify({"signal": True, **sig})
 
-For RANGING markets (price bouncing between support and resistance):
-- Bollinger Bands are NARROW (bands squeezing together)
-- Price oscillates up and down without clear direction
-- ATR (Average True Range) is LOW compared to recent history
-- Common on weekends, holidays, low-volume periods
-- Strategy: BUY at support, SELL at resistance for quick profits
+# ─── EA Status Receiver ────────────────────────────────────────────────────────
+@app.route("/status", methods=["POST"])
+def receive_status():
+    global mt5_status
+    try:
+        data = request.get_json(force=True)
+        mt5_status = data
+        mt5_status["received_at"] = datetime.utcnow().isoformat()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-For TRENDING markets (price moving strongly one direction):
-- BB Breakout already handles this — DO NOT generate range signals
+@app.route("/status", methods=["GET"])
+def send_status():
+    return jsonify(mt5_status if mt5_status else {"connected": False})
 
-Your job: Find ONE asset that is currently RANGING and give a clear trade signal.
+# ─── Kill Switch ───────────────────────────────────────────────────────────────
+@app.route("/trading/stop", methods=["GET","POST"])
+def stop_trading():
+    global trading_enabled, pending_signal
+    trading_enabled = False
+    pending_signal  = None
+    print("[KILL SWITCH] Trading STOPPED")
+    return jsonify({"trading_enabled": False, "message": "All trading halted"})
 
-Respond in EXACTLY this format:
-MARKET_MODE: RANGING or TRENDING
-BEST_ASSET: [symbol or NONE]
-ACTION: BUY or SELL or NONE
-SUPPORT: [price level or N/A]
-RESISTANCE: [price level or N/A]
-SCORE: [4 or 5]
-REASON: [one clear sentence explaining the range and entry]
-CONFIDENCE: [LOW / MEDIUM / HIGH]
+@app.route("/trading/resume", methods=["GET","POST"])
+def resume_trading():
+    global trading_enabled
+    trading_enabled = True
+    print("[KILL SWITCH] Trading RESUMED")
+    return jsonify({"trading_enabled": True, "message": "Trading resumed"})
 
-Rules:
-- Only generate a signal if CONFIDENCE is MEDIUM or HIGH
-- If all assets are clearly trending, output BEST_ASSET: NONE
-- BUY when price is near SUPPORT (bottom of range)
-- SELL when price is near RESISTANCE (top of range)
-- Be conservative — only fire when you are sure"""
+@app.route("/trading/status", methods=["GET"])
+def trading_status():
+    return jsonify({
+        "trading_enabled": trading_enabled,
+        "pending_signal": pending_signal is not None,
+        "recently_traded": recently_traded
+    })
 
+# ─── Scanner Intelligence Endpoints ───────────────────────────────────────────
+@app.route("/scanner/results", methods=["GET"])
+def scanner_results():
+    return jsonify(scan_results)
+
+@app.route("/scanner/run", methods=["GET","POST"])
+def manual_scan():
+    threading.Thread(target=run_scanner, daemon=True).start()
+    return jsonify({"status": "Scanner triggered manually"})
+
+# ─── 3-Stage Global Scanner ───────────────────────────────────────────────────
+def _claude_validate(symbol, action, price, sig_type):
+    """Ask Claude AI to score a signal 1-5"""
     try:
         resp = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=200,
-            messages=[{"role":"user","content":prompt}]
+            model="claude-sonnet-4-20250514",
+            max_tokens=50,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Claude-Market signal validator. Score this {sig_type} signal 1-5.\n"
+                    f"Symbol: {symbol} | Action: {action} | Price: {price}\n"
+                    f"Consider: trend strength, volatility, time of day, market session.\n"
+                    f"Reply with ONLY a single integer 1-5. Nothing else."
+                )
+            }]
         )
         text = resp.content[0].text.strip()
-        print(f"Range scan result:\n{text}")
-
-        # Parse response
-        mode       = "TRENDING"
-        asset      = "NONE"
-        action     = "NONE"
-        score      = 4
-        reason     = ""
-        confidence = "LOW"
-
-        for line in text.split("\n"):
-            line = line.strip()
-            if line.startswith("MARKET_MODE:"):
-                mode = line.split(":",1)[1].strip()
-            elif line.startswith("BEST_ASSET:"):
-                asset = line.split(":",1)[1].strip()
-            elif line.startswith("ACTION:"):
-                action = line.split(":",1)[1].strip()
-            elif line.startswith("SCORE:"):
-                try: score = int(line.split(":",1)[1].strip())
-                except: pass
-            elif line.startswith("REASON:"):
-                reason = line.split(":",1)[1].strip()
-            elif line.startswith("CONFIDENCE:"):
-                confidence = line.split(":",1)[1].strip()
-
-        with scanner_lock:
-            range_scanner["results"][datetime.now(SAST).strftime("%H:%M")] = {
-                "mode": mode, "asset": asset, "action": action,
-                "confidence": confidence, "reason": reason
-            }
-            range_scanner["status"] = f"Last scan: {now_str} | Mode:{mode} | {asset} {action}"
-            nxt = datetime.now(SAST) + timedelta(minutes=30)
-            range_scanner["next_run"] = nxt.strftime("%H:%M SAST")
-
-        # Generate signal if ranging conditions met
-        if (mode == "RANGING" and
-            asset != "NONE" and
-            action in ("BUY","SELL") and
-            confidence in ("MEDIUM","HIGH") and
-            score >= 4):
-
-            sym = resolve_symbol(asset)
-            if sym:
-                now_sig = datetime.now(SAST).strftime("%Y.%m.%d %H:%M:%S")
-                full_reason = f"RANGE: {reason}"
-                with signal_lock:
-                    pending_signal = {
-                        "symbol": sym, "action": action,
-                        "reason": full_reason, "score": score,
-                        "type":   "RANGE", "time": now_sig
-                    }
-                with scanner_lock:
-                    range_scanner["last_signal"] = f"{sym} {action} {now_sig}"
-                    range_scanner["signals_today"] += 1
-
-                print(f"🎯 Range signal generated: {sym} {action} Score:{score} [{confidence}]")
-
-                if GMAIL_USER and GMAIL_PASS:
-                    threading.Thread(
-                        target=send_email,
-                        args=(sym,action,"auto",score,full_reason,"RANGE"),
-                        daemon=True
-                    ).start()
-        else:
-            print(f"Range scan: No signal generated — Mode:{mode} Asset:{asset} Confidence:{confidence}")
-
+        score = int("".join(c for c in text if c.isdigit())[:1])
+        return max(1, min(5, score))
     except Exception as e:
-        print(f"Range scan Claude error: {e}")
-        with scanner_lock:
-            range_scanner["status"] = f"Error: {e}"
+        print(f"[VALIDATE ERROR] {e}")
+        return 3  # Default mid-score on failure
 
-
-# ── HELPERS ───────────────────────────────────────────────────────
-def resolve_symbol(ticker):
-    mapping = {
-        "XAUUSD":"GOLD","GOLD":"GOLD","XAGUSD":"SILVER","SILVER":"SILVER",
-        "BTCUSD":"BTCUSD","BTC":"BTCUSD","ETHUSD":"ETHUSD","ETH":"ETHUSD",
-        "NAS100":"NAS100","US100":"NAS100","NASDAQ":"NAS100","US_TECH100":"NAS100"
-    }
-    return mapping.get(ticker, ticker)
-
-
-def validate_with_claude(symbol, action, price, sig_type="BB"):
-    prompt = f"""Trading signal:
-Symbol: {symbol} | Action: {action} | Price: {price} | Type: {sig_type}
-
-Score 1-5:
-Box 1 — Major tradeable asset?
-Box 2 — {action} correct direction for {sig_type} signal?
-Box 3 — Price level reasonable?
-Box 4 — 2% risk rule OK?
-Box 5 — Signal confirmed?
-
-SCORE: X
-REASON: one sentence"""
-
-    resp = client.messages.create(
-        model="claude-sonnet-4-5", max_tokens=100,
-        messages=[{"role":"user","content":prompt}]
-    )
-    text = resp.content[0].text.strip()
-    score=4; reason=f"{sig_type} validated"
-    for line in text.split("\n"):
-        line=line.strip()
-        if line.startswith("SCORE:"):
-            try: score=int(line.replace("SCORE:","").strip().split("/")[0])
-            except: pass
-        elif line.startswith("REASON:"):
-            reason=line.replace("REASON:","").strip()
-    return score, reason
-
-
-def send_email(symbol, action, price, score, reason, sig_type="BB"):
+def _scan_group(group_name, assets):
+    """Stage 1: Ask Claude to rank top 5 ranging assets in a group"""
     try:
-        now_str = datetime.now(SAST).strftime("%H:%M SAST — %d %b %Y")
-        emoji   = "🔄" if sig_type=="RANGE" else "📈"
-        subject = f"{emoji} CM {sig_type}: {action} {symbol} — Score {score}/5"
-        body = (f"Claude-Market {sig_type} Signal\n\n"
-                f"Time: {now_str}\nSymbol: {symbol}\nAction: {action}\n"
-                f"Type: {sig_type} ({'Range Trading' if sig_type=='RANGE' else 'BB Breakout'})\n"
-                f"Score: {score}/5\nReason: {reason}\n\n"
-                f"EA placing trade automatically.\nAccount: 107072723")
-        msg = MIMEMultipart()
-        msg["From"]=GMAIL_USER; msg["To"]=GMAIL_USER; msg["Subject"]=subject
-        msg.attach(MIMEText(body,"plain"))
-        with smtplib.SMTP_SSL("smtp.gmail.com",465) as s:
-            s.login(GMAIL_USER,GMAIL_PASS); s.send_message(msg)
-        print(f"Email: {subject}")
+        asset_list = ", ".join(assets)
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Claude-Market Range Scanner — Stage 1.\n"
+                    f"Group: {group_name}\n"
+                    f"Assets: {asset_list}\n"
+                    f"Current UTC time: {datetime.utcnow().strftime('%H:%M %A')}\n\n"
+                    f"Analyse these assets for RANGING (sideways) market conditions.\n"
+                    f"Consider: Bollinger Band squeeze, low ATR, consolidation, support/resistance.\n\n"
+                    f"Reply ONLY with a JSON array of the top 5 symbols most likely ranging right now.\n"
+                    f"Format: [\"SYM1\",\"SYM2\",\"SYM3\",\"SYM4\",\"SYM5\"]\n"
+                    f"Use exact symbol names from the list. JSON only, no explanation."
+                )
+            }]
+        )
+        text = resp.content[0].text.strip()
+        start = text.find("[")
+        end   = text.rfind("]") + 1
+        if start >= 0 and end > start:
+            result = json.loads(text[start:end])
+            return [s for s in result if s in assets][:5]
     except Exception as e:
-        print(f"Email failed: {e}")
+        print(f"[SCAN ERROR] Stage1 {group_name}: {e}")
+    return assets[:3]  # Fallback
 
+def _pick_group_winner(group_name, top5, recently):
+    """Stage 2: Pick the single best ranging asset from a group's top 5"""
+    try:
+        avoid = ", ".join(recently) if recently else "none"
+        candidates = ", ".join(top5)
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Claude-Market Range Scanner — Stage 2.\n"
+                    f"Group: {group_name}\n"
+                    f"Candidates: {candidates}\n"
+                    f"Recently traded (avoid): {avoid}\n\n"
+                    f"Pick the SINGLE BEST ranging opportunity from the candidates.\n"
+                    f"Do NOT pick from the recently traded list.\n\n"
+                    f"Reply ONLY with this exact JSON format:\n"
+                    f"{{\"symbol\":\"SYMBOL\",\"action\":\"BUY\",\"support\":0.0,\"resistance\":0.0,"
+                    f"\"confidence\":\"HIGH\",\"reason\":\"brief reason\"}}\n"
+                    f"action must be BUY (near support) or SELL (near resistance).\n"
+                    f"JSON only, no explanation."
+                )
+            }]
+        )
+        text = resp.content[0].text.strip()
+        start = text.find("{")
+        end   = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            result = json.loads(text[start:end])
+            if result.get("symbol") and result.get("action"):
+                return result
+    except Exception as e:
+        print(f"[SCAN ERROR] Stage2 {group_name}: {e}")
+    return None
 
-# ── MAIN ─────────────────────────────────────────────────────────
+def _pick_global_winner(group_winners, recently):
+    """Stage 3: Pick the best opportunity across all group winners"""
+    try:
+        candidates_json = json.dumps(group_winners, indent=2)
+        avoid = ", ".join(recently) if recently else "none"
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Claude-Market Range Scanner — Stage 3: Global Final.\n"
+                    f"Group winners to compare:\n{candidates_json}\n"
+                    f"Recently traded (avoid): {avoid}\n\n"
+                    f"Select the SINGLE BEST global ranging opportunity.\n"
+                    f"Score each on: confidence level, time of day suitability, "
+                    f"typical range width, broker availability.\n\n"
+                    f"Reply ONLY with this JSON:\n"
+                    f"{{\"symbol\":\"SYM\",\"action\":\"BUY\",\"score\":5,"
+                    f"\"group\":\"GroupName\",\"support\":0.0,\"resistance\":0.0,"
+                    f"\"confidence\":\"HIGH\",\"reason\":\"explanation\","
+                    f"\"broker_available\":true}}\n"
+                    f"JSON only."
+                )
+            }]
+        )
+        text = resp.content[0].text.strip()
+        start = text.find("{")
+        end   = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            return json.loads(text[start:end])
+    except Exception as e:
+        print(f"[SCAN ERROR] Stage3 global: {e}")
+    return None
+
+def _add_to_history(symbol, action, score, sig_type):
+    """Track recently traded assets for rotation"""
+    global recently_traded
+    entry = {"symbol": symbol, "action": action, "score": score,
+             "type": sig_type, "time": datetime.utcnow().isoformat()}
+    scan_results["history"].insert(0, entry)
+    scan_results["history"] = scan_results["history"][:20]
+
+    # Keep rotation list for 24h
+    if symbol not in recently_traded:
+        recently_traded.append(symbol)
+    # Clear entries older than 24h (simple: keep last 12)
+    recently_traded = recently_traded[-12:]
+
+def run_scanner():
+    """Full 3-stage scan — runs every 30 minutes"""
+    global pending_signal
+    with scan_lock:
+        print(f"\n[SCANNER] Starting 3-stage scan — {datetime.utcnow().strftime('%H:%M UTC')}")
+        scan_results["last_run"] = datetime.utcnow().isoformat()
+        scan_results["next_run"] = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
+
+        if not trading_enabled:
+            print("[SCANNER] Skipped — kill switch active")
+            return
+
+        # ── STAGE 1: Scan all 6 groups ────────────────────────────────────────
+        print("[SCANNER] Stage 1: Scanning 6 groups × 9 assets...")
+        stage1 = {}
+        for group, assets in ASSET_GROUPS.items():
+            top5 = _scan_group(group, assets)
+            stage1[group] = top5
+            print(f"  {group}: {top5}")
+            time.sleep(1)  # Rate limit spacing
+        scan_results["stage1"] = stage1
+
+        # ── STAGE 2: Pick winner per group ────────────────────────────────────
+        print("[SCANNER] Stage 2: Picking group winners...")
+        stage2 = {}
+        for group, top5 in stage1.items():
+            if not top5: continue
+            winner = _pick_group_winner(group, top5, recently_traded)
+            if winner:
+                stage2[group] = winner
+                print(f"  {group} winner: {winner.get('symbol')} {winner.get('action')} ({winner.get('confidence')})")
+            time.sleep(1)
+        scan_results["stage2"] = stage2
+
+        # ── STAGE 3: Global champion ───────────────────────────────────────────
+        if not stage2:
+            print("[SCANNER] No group winners found")
+            return
+
+        print("[SCANNER] Stage 3: Selecting global champion...")
+        global_winner = _pick_global_winner(list(stage2.values()), recently_traded)
+
+        if not global_winner:
+            print("[SCANNER] No global winner selected")
+            return
+
+        sym    = global_winner.get("symbol", "")
+        action = str(global_winner.get("action", "BUY")).upper()
+        score  = int(global_winner.get("score", 3))
+        conf   = global_winner.get("confidence", "MEDIUM")
+
+        print(f"[SCANNER] ★ GLOBAL WINNER: {sym} {action} Score:{score} Confidence:{conf}")
+        scan_results["global_winner"] = global_winner
+
+        # Only trade on MEDIUM or HIGH confidence
+        if conf not in ["MEDIUM", "HIGH"] or score < 3:
+            print(f"[SCANNER] Confidence too low ({conf}) — no trade fired")
+            return
+
+        # Check rotation
+        if sym in recently_traded:
+            print(f"[SCANNER] {sym} recently traded — rotation guard active")
+            return
+
+        if pending_signal:
+            print("[SCANNER] Signal already pending — skipping")
+            return
+
+        # Fire the signal
+        pending_signal = {
+            "symbol": sym,
+            "action": action,
+            "price": "0",
+            "score": str(score),
+            "signal_type": "RANGE_SCAN",
+            "confidence": conf,
+            "reason": global_winner.get("reason", ""),
+            "source": "scanner",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        _add_to_history(sym, action, score, "RANGE")
+        print(f"[SCANNER] Signal fired → {sym} {action}")
+
+# ─── Background Scanner Thread ─────────────────────────────────────────────────
+def scanner_loop():
+    time.sleep(60)  # Initial delay — let server start
+    while True:
+        try:
+            run_scanner()
+        except Exception as e:
+            print(f"[SCANNER ERROR] {e}")
+        time.sleep(30 * 60)  # 30-minute cycle
+
+threading.Thread(target=scanner_loop, daemon=True).start()
+
+# ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-
-    # Start range scanner background thread
-    scanner_thread = threading.Thread(target=range_scanner_loop, daemon=True)
-    scanner_thread.start()
-
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    print(f"Claude-Market Webhook Server v4.0")
-    print(f"Port: {port}")
-    print(f"Features: BB Signals + Auto Range Scanner + Kill Switch")
-    print(f"Endpoints:")
-    print(f"  GET  /              — health")
-    print(f"  GET  /signal        — EA polls")
-    print(f"  GET  /signal/clear  — EA clears")
-    print(f"  POST /webhook       — TradingView + Range signals")
-    print(f"  POST /status        — EA reports")
-    print(f"  GET  /status        — Command Centre reads")
-    print(f"  GET  /trading/stop  — KILL SWITCH STOP")
-    print(f"  GET  /trading/resume — KILL SWITCH RESUME")
-    print(f"  GET  /trading/status — current state")
-    server.serve_forever()
+    print(f"Claude-Market Webhook Server v5.0 — port {port}")
+    app.run(host="0.0.0.0", port=port)
