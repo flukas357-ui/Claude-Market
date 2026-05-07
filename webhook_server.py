@@ -1,7 +1,8 @@
 """
-Claude-Market Webhook Server v5.0
+Claude-Market Webhook Server v5.1
 Lukas Ferreira - Pretoria ZA
 Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
+Model: claude-sonnet-4-5
 """
 
 from flask import Flask, request, jsonify
@@ -45,7 +46,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "5.0",
+        "version": "5.1",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -425,6 +426,3 @@ if __name__ == "__main__":
     print(f"Claude-Market Webhook Server v5.0 — port {port}")
     app.run(host="0.0.0.0", port=port)
 
-    port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v5.0 — port {port}")
-    app.run(host="0.0.0.0", port=port)
