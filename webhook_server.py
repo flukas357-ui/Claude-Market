@@ -62,7 +62,7 @@ def root():
 def test_apikey():
     try:
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=10,
             messages=[{"role":"user","content":"Reply with OK"}]
         )
@@ -188,7 +188,7 @@ def _claude_validate(symbol, action, price, sig_type):
     """Ask Claude AI to score a signal 1-5"""
     try:
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=50,
             messages=[{
                 "role": "user",
@@ -212,7 +212,7 @@ def _scan_group(group_name, assets):
     try:
         asset_list = ", ".join(assets)
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=200,
             messages=[{
                 "role": "user",
@@ -245,7 +245,7 @@ def _pick_group_winner(group_name, top5, recently):
         avoid = ", ".join(recently) if recently else "none"
         candidates = ", ".join(top5)
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=200,
             messages=[{
                 "role": "user",
@@ -281,7 +281,7 @@ def _pick_global_winner(group_winners, recently):
         candidates_json = json.dumps(group_winners, indent=2)
         avoid = ", ".join(recently) if recently else "none"
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=300,
             messages=[{
                 "role": "user",
