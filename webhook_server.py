@@ -57,6 +57,19 @@ def root():
         "timestamp": datetime.utcnow().isoformat()
     })
 
+# ─── API Key Test ─────────────────────────────────────────────────────────────
+@app.route("/test/apikey", methods=["GET"])
+def test_apikey():
+    try:
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=10,
+            messages=[{"role":"user","content":"Reply with OK"}]
+        )
+        return jsonify({"status":"success","response":resp.content[0].text,"key_prefix":os.environ.get("ANTHROPIC_API_KEY","")[:12]+"..."})
+    except Exception as e:
+        return jsonify({"status":"error","error":str(e),"key_prefix":os.environ.get("ANTHROPIC_API_KEY","")[:12]+"..."})
+
 # ─── TradingView Webhook ───────────────────────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def webhook():
