@@ -16,6 +16,19 @@ import os
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
+# ─── CORS — allow Command Centre to fetch from any origin ─────────────────────
+@app.after_request
+def add_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+@app.route("/", methods=["OPTIONS"])
+@app.route("/<path:path>", methods=["OPTIONS"])
+def handle_options(path=""):
+    return "", 204
+
 # ─── State ────────────────────────────────────────────────────────────────────
 pending_signal   = None          # Signal waiting for EA to pick up
 trading_enabled  = True          # Kill switch
