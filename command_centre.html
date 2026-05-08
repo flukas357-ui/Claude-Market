@@ -162,7 +162,7 @@
 <div class="topbar">
   <div>
     <div class="logo">⚡ CLAUDE-MARKET</div>
-    <div class="version">Command Centre v4.2 | Lukas Ferreira — Pretoria 🇿🇦</div>
+    <div class="version">Command Centre v4.3 | Lukas Ferreira — Pretoria 🇿🇦</div>
   </div>
   <button class="kill-switch kill-on" id="killSwitch" onclick="toggleKillSwitch()">
     🟢 TRADING ACTIVE
@@ -188,6 +188,7 @@
   <button class="nav-btn" onclick="showPage('websites',this)">🌐 All Websites</button>
   <button class="nav-btn" onclick="showPage('files',this)">📁 Files &amp; Versions</button>
   <button class="nav-btn" onclick="showPage('howto',this)">📖 How It Works</button>
+  <button class="nav-btn" onclick="showPage('journal',this);jnlRefresh()">📋 Trade Journal</button>
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
@@ -1421,6 +1422,615 @@ addLog('Connecting to ' + WEBHOOK, 'info');
       </div>
     </div>
   </div>
+</div>
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- PAGE 6: TRADE JOURNAL                                                      -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="page" id="page-journal">
+<style>
+/* ── Journal Styles ── */
+.jnl-wrap { padding: 14px 0; }
+.jnl-toolbar { display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+.jnl-search { padding:8px 14px; background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.88rem; width:220px; }
+.jnl-search::placeholder { color:var(--muted); }
+.jnl-filter { padding:8px 12px; background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem; cursor:pointer; }
+.jnl-btn { padding:7px 16px; border-radius:6px; border:none; cursor:pointer; font-size:0.82rem; font-weight:600; transition:all 0.15s; }
+.jnl-tabs { display:flex; gap:0; margin-bottom:0; border-bottom:2px solid var(--border); }
+.jnl-tab { padding:10px 24px; background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:0.9rem; font-weight:600; border-bottom:2px solid transparent; margin-bottom:-2px; transition:all 0.15s; }
+.jnl-tab.active { color:var(--green); border-bottom-color:var(--green); }
+.jnl-tab:hover { color:var(--text); }
+.jnl-count { background:rgba(0,255,136,0.15); color:var(--green); padding:1px 7px; border-radius:10px; font-size:0.72rem; margin-left:6px; }
+
+/* Table */
+.jnl-table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:8px; }
+.jnl-table { width:100%; border-collapse:collapse; font-size:0.82rem; min-width:900px; }
+.jnl-table th {
+  background:var(--bg3); color:var(--muted); padding:9px 10px;
+  text-align:left; font-size:0.74rem; text-transform:uppercase; letter-spacing:0.5px;
+  cursor:pointer; user-select:none; white-space:nowrap; position:relative;
+  border-bottom:1px solid var(--border);
+}
+.jnl-table th:hover { color:var(--text); background:var(--bg2); }
+.jnl-table th.sort-asc::after  { content:" ▲"; color:var(--green); font-size:0.65rem; }
+.jnl-table th.sort-desc::after { content:" ▼"; color:var(--green); font-size:0.65rem; }
+.jnl-table th.dragging { opacity:0.4; }
+.jnl-table th.drag-over { border-left:2px solid var(--green); }
+.jnl-table td { padding:8px 10px; border-bottom:1px solid var(--border); white-space:nowrap; vertical-align:middle; }
+.jnl-table tr:last-child td { border-bottom:none; }
+.jnl-table tr:hover td { background:rgba(255,255,255,0.02); }
+.jnl-table tr.selected td { background:rgba(0,255,136,0.05); }
+
+/* Cell styles */
+.jnl-buy  { background:rgba(0,255,136,0.15); color:var(--green); padding:2px 8px; border-radius:3px; font-weight:700; font-size:0.75rem; }
+.jnl-sell { background:rgba(255,68,68,0.15);  color:var(--red);   padding:2px 8px; border-radius:3px; font-weight:700; font-size:0.75rem; }
+.jnl-profit-pos { color:var(--green); font-weight:700; }
+.jnl-profit-neg { color:var(--red);   font-weight:700; }
+.jnl-strategy { padding:2px 8px; border-radius:3px; font-size:0.72rem; font-weight:700; }
+.jnl-bb       { background:rgba(167,139,250,0.2); color:var(--purple); }
+.jnl-range    { background:rgba(255,204,0,0.2);   color:var(--yellow); }
+.jnl-reversal { background:rgba(251,146,60,0.2);  color:var(--orange); }
+.jnl-del-btn  { background:rgba(255,68,68,0.15); color:var(--red); border:1px solid rgba(255,68,68,0.3); padding:3px 8px; border-radius:4px; cursor:pointer; font-size:0.72rem; }
+.jnl-del-btn:hover { background:rgba(255,68,68,0.3); }
+
+/* Column chooser */
+.col-chooser { position:relative; }
+.col-dropdown { display:none; position:absolute; top:110%; right:0; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:10px; z-index:200; min-width:200px; box-shadow:0 8px 24px rgba(0,0,0,0.4); }
+.col-dropdown.open { display:block; }
+.col-item { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:4px; cursor:pointer; font-size:0.82rem; }
+.col-item:hover { background:var(--bg3); }
+.col-item input { accent-color:var(--green); cursor:pointer; }
+
+/* Exposure bars */
+.exp-bar-wrap { background:var(--bg3); border-radius:4px; height:8px; flex:1; overflow:hidden; }
+.exp-bar { height:100%; border-radius:4px; transition:width 0.4s; }
+.exp-row { display:flex; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid var(--border); }
+.exp-sym { font-weight:700; min-width:80px; }
+.exp-val { font-size:0.82rem; min-width:80px; text-align:right; }
+
+/* Summary cards */
+.jnl-summary { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-bottom:14px; }
+.jnl-sum-card { background:var(--bg3); border:1px solid var(--border); border-radius:8px; padding:10px; text-align:center; }
+.jnl-sum-label { font-size:0.68rem; color:var(--muted); margin-bottom:3px; text-transform:uppercase; }
+.jnl-sum-val   { font-size:1.1rem; font-weight:700; }
+</style>
+
+<div class="jnl-wrap">
+  <!-- Summary Bar -->
+  <div class="jnl-summary" id="jnl-summary">
+    <div class="jnl-sum-card"><div class="jnl-sum-label">Open Trades</div><div class="jnl-sum-val" id="js-open-count" style="color:var(--blue)">0</div></div>
+    <div class="jnl-sum-card"><div class="jnl-sum-label">Open P&L</div><div class="jnl-sum-val" id="js-open-pnl">$0.00</div></div>
+    <div class="jnl-sum-card"><div class="jnl-sum-label">Closed Trades</div><div class="jnl-sum-val" id="js-closed-count" style="color:var(--muted)">0</div></div>
+    <div class="jnl-sum-card"><div class="jnl-sum-label">Closed P&L</div><div class="jnl-sum-val" id="js-closed-pnl">$0.00</div></div>
+    <div class="jnl-sum-card"><div class="jnl-sum-label">Win Rate</div><div class="jnl-sum-val" id="js-winrate" style="color:var(--yellow)">-</div></div>
+    <div class="jnl-sum-card"><div class="jnl-sum-label">Total P&L</div><div class="jnl-sum-val" id="js-total-pnl">$0.00</div></div>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="jnl-toolbar">
+    <input class="jnl-search" id="jnl-search" placeholder="🔍 Search symbol, strategy, ticket..." oninput="jnlRender()">
+    <select class="jnl-filter" id="jnl-filter-type" onchange="jnlRender()">
+      <option value="">All Types</option>
+      <option value="BUY">BUY</option>
+      <option value="SELL">SELL</option>
+    </select>
+    <select class="jnl-filter" id="jnl-filter-strat" onchange="jnlRender()">
+      <option value="">All Strategies</option>
+      <option value="BB">BB Breakout</option>
+      <option value="RANGE">Range</option>
+      <option value="REVERSAL">Reversal</option>
+    </select>
+    <select class="jnl-filter" id="jnl-filter-result" onchange="jnlRender()">
+      <option value="">All Results</option>
+      <option value="win">Winners</option>
+      <option value="loss">Losers</option>
+    </select>
+    <button class="jnl-btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text)" onclick="jnlClearFilters()">✕ Clear</button>
+    <div style="margin-left:auto;display:flex;gap:8px">
+      <button class="jnl-btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text)" onclick="jnlExportCSV()">⬇ Export CSV</button>
+      <div class="col-chooser">
+        <button class="jnl-btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text)" onclick="toggleColDropdown()">⚙ Columns</button>
+        <div class="col-dropdown" id="col-dropdown"></div>
+      </div>
+      <button class="jnl-btn btn-send" onclick="jnlRefresh()">🔄 Refresh</button>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="jnl-tabs">
+    <button class="jnl-tab active" onclick="jnlSetTab('open',this)">📈 Open Trades <span class="jnl-count" id="tab-open-count">0</span></button>
+    <button class="jnl-tab" onclick="jnlSetTab('closed',this)">📁 Closed Trades <span class="jnl-count" id="tab-closed-count">0</span></button>
+    <button class="jnl-tab" onclick="jnlSetTab('exposure',this)">🎯 Exposure</button>
+  </div>
+
+  <!-- Table -->
+  <div id="jnl-open-tab">
+    <div class="jnl-table-wrap" style="margin-top:12px">
+      <table class="jnl-table" id="jnl-open-table">
+        <thead id="jnl-open-head"></thead>
+        <tbody id="jnl-open-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="jnl-closed-tab" style="display:none">
+    <div class="jnl-table-wrap" style="margin-top:12px">
+      <table class="jnl-table" id="jnl-closed-table">
+        <thead id="jnl-closed-head"></thead>
+        <tbody id="jnl-closed-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="jnl-exposure-tab" style="display:none;margin-top:12px">
+    <div class="card" id="jnl-exposure-content"></div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// TRADE JOURNAL
+// ══════════════════════════════════════════════════════════════
+let jnlTab       = 'open';
+let jnlSortCol   = 'time';
+let jnlSortDir   = 'desc';
+let jnlOpenData  = [];
+let jnlClosedData= [];
+let jnlColOrder  = ['ticket','time','symbol','type','strategy','lots','entry','current','sl','tp','spent','swap','profit','pct','trail'];
+let jnlColVis    = {ticket:true,time:true,symbol:true,type:true,strategy:true,lots:true,entry:true,current:true,sl:true,tp:true,spent:true,swap:false,profit:true,pct:true,trail:true};
+let jnlDragCol   = null;
+
+const JNL_COLS = {
+  ticket:   { label:'Ticket',    tip:'Position ticket number' },
+  time:     { label:'Opened',    tip:'Time trade was opened' },
+  symbol:   { label:'Symbol',    tip:'Trading asset' },
+  type:     { label:'Type',      tip:'BUY or SELL' },
+  strategy: { label:'Strategy',  tip:'BB Breakout / Range / Reversal' },
+  lots:     { label:'Volume',    tip:'Lot size' },
+  entry:    { label:'Open Price',tip:'Entry price' },
+  current:  { label:'Cur Price', tip:'Current market price' },
+  sl:       { label:'S/L',       tip:'Stop Loss level' },
+  tp:       { label:'T/P',       tip:'Take Profit level' },
+  spent:    { label:'$ Spent',   tip:'Margin / capital used for this trade' },
+  swap:     { label:'Swap',      tip:'Overnight swap charge' },
+  profit:   { label:'Profit',    tip:'Current profit/loss in $' },
+  pct:      { label:'% Acct',    tip:'Profit as % of account balance' },
+  trail:    { label:'Trail',     tip:'Current trailing stop level' },
+  closetime:{ label:'Closed',    tip:'Time trade was closed' },
+  closeprice:{ label:'Close Price',tip:'Price at close' },
+  result:   { label:'Result',    tip:'Win or Loss' },
+};
+
+// ── Extract strategy from comment ─────────────────────────────
+function getStrategy(comment) {
+  if(!comment) return 'BB';
+  if(comment.includes('REVERSAL')) return 'REVERSAL';
+  if(comment.includes('RANGE'))    return 'RANGE';
+  return 'BB';
+}
+
+function stratBadge(s) {
+  const cls = s === 'REVERSAL' ? 'jnl-reversal' : s === 'RANGE' ? 'jnl-range' : 'jnl-bb';
+  const lbl = s === 'REVERSAL' ? '🔄 Reversal' : s === 'RANGE' ? '↔ Range' : '📈 BB Break';
+  return `<span class="jnl-strategy ${cls}">${lbl}</span>`;
+}
+
+function trailBadge(comment) {
+  if(!comment) return '<span style="color:var(--muted);font-size:0.75rem">—</span>';
+  if(comment.includes('L3')) return '<span style="background:rgba(0,255,136,0.2);color:var(--green);padding:2px 7px;border-radius:3px;font-size:0.72rem;font-weight:700">L3 ATR</span>';
+  if(comment.includes('L2')) return '<span style="background:rgba(255,204,0,0.2);color:var(--yellow);padding:2px 7px;border-radius:3px;font-size:0.72rem;font-weight:700">L2 LOCK</span>';
+  if(comment.includes('L1')) return '<span style="background:rgba(79,163,255,0.2);color:var(--blue);padding:2px 7px;border-radius:3px;font-size:0.72rem;font-weight:700">L1 B/E</span>';
+  return '<span style="color:var(--muted);font-size:0.75rem">NOT ACTIVE</span>';
+}
+
+// ── Fetch data from webhook ───────────────────────────────────
+async function jnlRefresh() {
+  try {
+    const r = await fetch(WEBHOOK + '/status');
+    const d = await r.json();
+    const bal = parseFloat(d.balance || 10000);
+
+    jnlOpenData = (d.positions || []).map(p => ({
+      ticket:   p.ticket,
+      time:     p.open_time || '--',
+      symbol:   p.symbol,
+      type:     p.type,
+      strategy: getStrategy(p.comment),
+      lots:     parseFloat(p.lots || 0),
+      entry:    parseFloat(p.entry || 0),
+      current:  p.type === 'BUY'
+                ? parseFloat(SymbolBid(p.symbol) || p.entry)
+                : parseFloat(SymbolAsk(p.symbol) || p.entry),
+      sl:       parseFloat(p.sl || 0),
+      tp:       parseFloat(p.tp || 0),
+      spent:    parseFloat(p.margin || (p.lots * p.entry * 100).toFixed(2) || 0),
+      swap:     parseFloat(p.swap || 0),
+      profit:   parseFloat(p.profit || 0),
+      pct:      bal > 0 ? (parseFloat(p.profit) / bal * 100) : 0,
+      trail:    p.comment || '',
+      comment:  p.comment || '',
+      balance:  bal
+    }));
+
+    // Load closed trades from webhook history if available
+    try {
+      const hr = await fetch(WEBHOOK + '/history');
+      if(hr.ok) {
+        const hd = await hr.json();
+        const existing = jnlClosedData.map(x => x.ticket);
+        (hd.trades || []).forEach(t => {
+          if(!existing.includes(t.ticket)) {
+            jnlClosedData.unshift({
+              ticket:     t.ticket,
+              time:       t.open_time || '--',
+              closetime:  t.close_time || '--',
+              symbol:     t.symbol,
+              type:       t.type,
+              strategy:   getStrategy(t.comment),
+              lots:       parseFloat(t.lots || 0),
+              entry:      parseFloat(t.entry || 0),
+              closeprice: parseFloat(t.close_price || 0),
+              sl:         parseFloat(t.sl || 0),
+              tp:         parseFloat(t.tp || 0),
+              spent:      parseFloat(t.margin || 0),
+              swap:       parseFloat(t.swap || 0),
+              profit:     parseFloat(t.profit || 0),
+              pct:        parseFloat(t.pct || 0),
+              result:     parseFloat(t.profit) >= 0 ? 'WIN' : 'LOSS',
+              comment:    t.comment || ''
+            });
+          }
+        });
+      }
+    } catch(e) {}
+
+    jnlRender();
+    jnlUpdateSummary();
+    jnlRenderExposure();
+    addLog('Trade Journal refreshed — ' + jnlOpenData.length + ' open', 'ok');
+  } catch(e) {
+    addLog('Journal refresh failed: ' + e.message, 'err');
+  }
+}
+
+function SymbolBid(sym) { return 0; } // Placeholder — current price from webhook
+function SymbolAsk(sym) { return 0; }
+
+// ── Summary Bar ───────────────────────────────────────────────
+function jnlUpdateSummary() {
+  const openPnL   = jnlOpenData.reduce((s,t) => s + t.profit, 0);
+  const closedPnL = jnlClosedData.reduce((s,t) => s + t.profit, 0);
+  const wins      = jnlClosedData.filter(t => t.profit >= 0).length;
+  const winRate   = jnlClosedData.length > 0
+                    ? ((wins / jnlClosedData.length) * 100).toFixed(0) + '%' : '-';
+
+  document.getElementById('js-open-count').textContent  = jnlOpenData.length;
+  document.getElementById('js-closed-count').textContent= jnlClosedData.length;
+  document.getElementById('js-winrate').textContent     = winRate;
+
+  const fmtPnL = (v) => {
+    const s = (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
+    return s;
+  };
+  const colPnL = (v, id) => {
+    const el = document.getElementById(id);
+    el.textContent = fmtPnL(v);
+    el.style.color = v >= 0 ? 'var(--green)' : 'var(--red)';
+  };
+  colPnL(openPnL, 'js-open-pnl');
+  colPnL(closedPnL, 'js-closed-pnl');
+  colPnL(openPnL + closedPnL, 'js-total-pnl');
+}
+
+// ── Render Table ──────────────────────────────────────────────
+function jnlRender() {
+  if(jnlTab === 'open')   renderOpenTable();
+  if(jnlTab === 'closed') renderClosedTable();
+  buildColDropdown();
+}
+
+function getFilters() {
+  return {
+    search: document.getElementById('jnl-search').value.toLowerCase(),
+    type:   document.getElementById('jnl-filter-type').value,
+    strat:  document.getElementById('jnl-filter-strat').value,
+    result: document.getElementById('jnl-filter-result').value
+  };
+}
+
+function filterData(data, f, isClosed) {
+  return data.filter(t => {
+    if(f.search && !JSON.stringify(t).toLowerCase().includes(f.search)) return false;
+    if(f.type  && t.type     !== f.type)   return false;
+    if(f.strat && t.strategy !== f.strat)  return false;
+    if(isClosed && f.result === 'win'  && t.profit < 0)  return false;
+    if(isClosed && f.result === 'loss' && t.profit >= 0) return false;
+    return true;
+  });
+}
+
+function sortData(data) {
+  return [...data].sort((a, b) => {
+    let av = a[jnlSortCol], bv = b[jnlSortCol];
+    if(typeof av === 'string') av = av.toLowerCase();
+    if(typeof bv === 'string') bv = bv.toLowerCase();
+    if(av < bv) return jnlSortDir === 'asc' ? -1 : 1;
+    if(av > bv) return jnlSortDir === 'asc' ?  1 : -1;
+    return 0;
+  });
+}
+
+function renderOpenTable() {
+  const f    = getFilters();
+  const data = sortData(filterData(jnlOpenData, f, false));
+  const cols = jnlColOrder.filter(c => jnlColVis[c] && JNL_COLS[c] && c !== 'closetime' && c !== 'closeprice' && c !== 'result');
+
+  // Header
+  const thead = document.getElementById('jnl-open-head');
+  thead.innerHTML = `<tr>${cols.map(c => `
+    <th data-col="${c}" class="${jnlSortCol===c?(jnlSortDir==='asc'?'sort-asc':'sort-desc'):''}"
+        draggable="true" onclick="jnlSort('${c}')"
+        ondragstart="jnlDragStart(event,'${c}')"
+        ondragover="jnlDragOver(event,'${c}')"
+        ondrop="jnlDrop(event,'${c}')"
+        title="${JNL_COLS[c].tip}">
+      ${JNL_COLS[c].label}
+    </th>`).join('')}</tr>`;
+
+  // Body
+  const tbody = document.getElementById('jnl-open-body');
+  document.getElementById('tab-open-count').textContent = data.length;
+  if(!data.length) {
+    tbody.innerHTML = `<tr><td colspan="${cols.length}" style="text-align:center;padding:30px;color:var(--muted)">No open trades</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = data.map(t => {
+    const digs = t.entry > 100 ? 2 : t.entry > 1 ? 4 : 5;
+    const fmt  = n => parseFloat(n||0).toFixed(digs);
+    const bal  = t.balance || 10000;
+    const pctStr = (t.profit/bal*100).toFixed(2) + '%';
+    return `<tr onclick="this.classList.toggle('selected')">${cols.map(c => {
+      switch(c) {
+        case 'ticket':   return `<td style="color:var(--muted);font-size:0.78rem">#${t.ticket}</td>`;
+        case 'time':     return `<td style="font-size:0.78rem;color:var(--muted)">${t.time}</td>`;
+        case 'symbol':   return `<td style="font-weight:700">${t.symbol}</td>`;
+        case 'type':     return `<td><span class="${t.type==='BUY'?'jnl-buy':'jnl-sell'}">${t.type}</span></td>`;
+        case 'strategy': return `<td>${stratBadge(t.strategy)}</td>`;
+        case 'lots':     return `<td>${t.lots.toFixed(2)}</td>`;
+        case 'entry':    return `<td>${fmt(t.entry)}</td>`;
+        case 'current':  return `<td style="color:var(--blue)">${fmt(t.entry)}</td>`;
+        case 'sl':       return `<td style="color:var(--red)">${fmt(t.sl)}</td>`;
+        case 'tp':       return `<td style="color:var(--green)">${fmt(t.tp)}</td>`;
+        case 'spent':    return `<td style="color:var(--yellow)">$${parseFloat(t.spent||0).toFixed(2)}</td>`;
+        case 'swap':     return `<td style="color:var(--muted)">${parseFloat(t.swap||0).toFixed(2)}</td>`;
+        case 'profit':   return `<td class="${t.profit>=0?'jnl-profit-pos':'jnl-profit-neg'}">${t.profit>=0?'+':''}$${Math.abs(t.profit).toFixed(2)}</td>`;
+        case 'pct':      return `<td class="${t.profit>=0?'jnl-profit-pos':'jnl-profit-neg'}">${pctStr}</td>`;
+        case 'trail':    return `<td>${trailBadge(t.trail)}</td>`;
+        default:         return `<td>—</td>`;
+      }
+    }).join('')}</tr>`;
+  }).join('');
+}
+
+function renderClosedTable() {
+  const f    = getFilters();
+  const data = sortData(filterData(jnlClosedData, f, true));
+  const cols = ['ticket','time','closetime','symbol','type','strategy','lots','entry','closeprice','sl','tp','spent','swap','profit','pct','result'].filter(c => {
+    if(c === 'closetime' || c === 'closeprice' || c === 'result') return true;
+    return jnlColVis[c] !== false;
+  });
+
+  const thead = document.getElementById('jnl-closed-head');
+  thead.innerHTML = `<tr>${cols.map(c => `
+    <th data-col="${c}" class="${jnlSortCol===c?(jnlSortDir==='asc'?'sort-asc':'sort-desc'):''}"
+        draggable="true" onclick="jnlSort('${c}')"
+        ondragstart="jnlDragStart(event,'${c}')"
+        ondragover="jnlDragOver(event,'${c}')"
+        ondrop="jnlDrop(event,'${c}')"
+        title="${(JNL_COLS[c]||{}).tip||''}">
+      ${(JNL_COLS[c]||{label:c}).label}
+    </th>`).join('')}<th>Action</th></tr>`;
+
+  const tbody = document.getElementById('jnl-closed-body');
+  document.getElementById('tab-closed-count').textContent = data.length;
+  if(!data.length) {
+    tbody.innerHTML = `<tr><td colspan="${cols.length+1}" style="text-align:center;padding:30px;color:var(--muted)">No closed trades yet — they appear here as trades close</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = data.map((t,i) => {
+    const digs = t.entry > 100 ? 2 : t.entry > 1 ? 4 : 5;
+    const fmt  = n => parseFloat(n||0).toFixed(digs);
+    return `<tr onclick="this.classList.toggle('selected')">${cols.map(c => {
+      switch(c) {
+        case 'ticket':     return `<td style="color:var(--muted);font-size:0.78rem">#${t.ticket}</td>`;
+        case 'time':       return `<td style="font-size:0.78rem;color:var(--muted)">${t.time}</td>`;
+        case 'closetime':  return `<td style="font-size:0.78rem;color:var(--muted)">${t.closetime||'--'}</td>`;
+        case 'symbol':     return `<td style="font-weight:700">${t.symbol}</td>`;
+        case 'type':       return `<td><span class="${t.type==='BUY'?'jnl-buy':'jnl-sell'}">${t.type}</span></td>`;
+        case 'strategy':   return `<td>${stratBadge(t.strategy)}</td>`;
+        case 'lots':       return `<td>${t.lots.toFixed(2)}</td>`;
+        case 'entry':      return `<td>${fmt(t.entry)}</td>`;
+        case 'closeprice': return `<td style="color:var(--blue)">${fmt(t.closeprice)}</td>`;
+        case 'sl':         return `<td style="color:var(--red)">${fmt(t.sl)}</td>`;
+        case 'tp':         return `<td style="color:var(--green)">${fmt(t.tp)}</td>`;
+        case 'spent':      return `<td style="color:var(--yellow)">$${parseFloat(t.spent||0).toFixed(2)}</td>`;
+        case 'swap':       return `<td style="color:var(--muted)">${parseFloat(t.swap||0).toFixed(2)}</td>`;
+        case 'profit':     return `<td class="${t.profit>=0?'jnl-profit-pos':'jnl-profit-neg'}">${t.profit>=0?'+':''}$${Math.abs(t.profit).toFixed(2)}</td>`;
+        case 'pct':        return `<td class="${t.profit>=0?'jnl-profit-pos':'jnl-profit-neg'}">${parseFloat(t.pct||0).toFixed(2)}%</td>`;
+        case 'result':     return `<td><span style="background:${t.profit>=0?'rgba(0,255,136,0.15)':'rgba(255,68,68,0.15)'};color:${t.profit>=0?'var(--green)':'var(--red)'};padding:2px 8px;border-radius:3px;font-size:0.75rem;font-weight:700">${t.profit>=0?'WIN':'LOSS'}</span></td>`;
+        default:           return `<td>—</td>`;
+      }
+    }).join('')}<td><button class="jnl-del-btn" onclick="jnlDeleteClosed(${i},event)">🗑 Delete</button></td></tr>`;
+  }).join('');
+}
+
+// ── Exposure Tab ──────────────────────────────────────────────
+function jnlRenderExposure() {
+  const el = document.getElementById('jnl-exposure-content');
+  if(!jnlOpenData.length) {
+    el.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">No open positions — exposure is zero</div>';
+    return;
+  }
+
+  // Group by symbol
+  const bySymbol = {};
+  jnlOpenData.forEach(t => {
+    if(!bySymbol[t.symbol]) bySymbol[t.symbol] = { lots:0, profit:0, spent:0, buy:0, sell:0 };
+    bySymbol[t.symbol].lots   += t.lots;
+    bySymbol[t.symbol].profit += t.profit;
+    bySymbol[t.symbol].spent  += parseFloat(t.spent||0);
+    if(t.type === 'BUY') bySymbol[t.symbol].buy += t.lots;
+    else                 bySymbol[t.symbol].sell+= t.lots;
+  });
+
+  const totalSpent = Object.values(bySymbol).reduce((s,v) => s + v.spent, 0);
+  const maxLots    = Math.max(...Object.values(bySymbol).map(v => v.lots));
+
+  el.innerHTML = `
+    <div class="card-title" style="margin-bottom:14px">🎯 Exposure Per Asset — ${Object.keys(bySymbol).length} assets open</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <div>
+        <div style="font-size:0.75rem;color:var(--muted);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">Position Size by Asset</div>
+        ${Object.entries(bySymbol).map(([sym, v]) => `
+          <div class="exp-row">
+            <div class="exp-sym">${sym}</div>
+            <div class="exp-bar-wrap">
+              <div class="exp-bar" style="width:${maxLots>0?(v.lots/maxLots*100):0}%;background:${v.profit>=0?'var(--green)':'var(--red)'}"></div>
+            </div>
+            <div class="exp-val" style="color:${v.profit>=0?'var(--green)':'var(--red)'}">
+              ${v.profit>=0?'+':''}$${Math.abs(v.profit).toFixed(2)}
+            </div>
+          </div>`).join('')}
+      </div>
+      <div>
+        <div style="font-size:0.75rem;color:var(--muted);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">Capital Exposure</div>
+        ${Object.entries(bySymbol).map(([sym, v]) => `
+          <div class="exp-row">
+            <div class="exp-sym">${sym}</div>
+            <div style="display:flex;gap:8px;flex:1;align-items:center">
+              ${v.buy>0  ? `<span style="background:rgba(0,255,136,0.15);color:var(--green);padding:2px 8px;border-radius:3px;font-size:0.75rem">BUY ${v.buy.toFixed(2)}</span>` : ''}
+              ${v.sell>0 ? `<span style="background:rgba(255,68,68,0.15);color:var(--red);padding:2px 8px;border-radius:3px;font-size:0.75rem">SELL ${v.sell.toFixed(2)}</span>` : ''}
+            </div>
+            <div class="exp-val" style="color:var(--yellow)">$${v.spent.toFixed(0)}</div>
+          </div>`).join('')}
+        <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px;display:flex;justify-content:space-between">
+          <span style="color:var(--muted);font-size:0.82rem">Total Capital Deployed</span>
+          <span style="font-weight:700;color:var(--yellow)">$${totalSpent.toFixed(2)}</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── Actions ───────────────────────────────────────────────────
+function jnlDeleteClosed(idx, e) {
+  e.stopPropagation();
+  if(!confirm('Delete this closed trade from journal?')) return;
+  jnlClosedData.splice(idx, 1);
+  jnlUpdateSummary();
+  renderClosedTable();
+  addLog('Closed trade deleted from journal', 'info');
+}
+
+function jnlSort(col) {
+  if(jnlSortCol === col) jnlSortDir = jnlSortDir === 'asc' ? 'desc' : 'asc';
+  else { jnlSortCol = col; jnlSortDir = 'desc'; }
+  jnlRender();
+}
+
+function jnlSetTab(tab, btn) {
+  jnlTab = tab;
+  document.querySelectorAll('.jnl-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('jnl-open-tab').style.display    = tab==='open'     ? 'block' : 'none';
+  document.getElementById('jnl-closed-tab').style.display  = tab==='closed'   ? 'block' : 'none';
+  document.getElementById('jnl-exposure-tab').style.display= tab==='exposure' ? 'block' : 'none';
+  jnlRender();
+}
+
+function jnlClearFilters() {
+  document.getElementById('jnl-search').value = '';
+  document.getElementById('jnl-filter-type').value   = '';
+  document.getElementById('jnl-filter-strat').value  = '';
+  document.getElementById('jnl-filter-result').value = '';
+  jnlRender();
+}
+
+// ── Column chooser ────────────────────────────────────────────
+function buildColDropdown() {
+  const dd = document.getElementById('col-dropdown');
+  dd.innerHTML = '<div style="font-size:0.75rem;color:var(--muted);margin-bottom:6px;padding:0 4px">Show/hide columns:</div>' +
+    Object.entries(JNL_COLS).filter(([k]) => k !== 'closetime' && k !== 'closeprice' && k !== 'result').map(([k,v]) =>
+      `<label class="col-item">
+        <input type="checkbox" ${jnlColVis[k]!==false?'checked':''} onchange="toggleCol('${k}',this.checked)">
+        ${v.label}
+      </label>`).join('');
+}
+
+function toggleCol(col, visible) {
+  jnlColVis[col] = visible;
+  jnlRender();
+}
+
+function toggleColDropdown() {
+  const dd = document.getElementById('col-dropdown');
+  dd.classList.toggle('open');
+  buildColDropdown();
+}
+
+document.addEventListener('click', e => {
+  if(!e.target.closest('.col-chooser')) {
+    document.getElementById('col-dropdown').classList.remove('open');
+  }
+});
+
+// ── Column drag reorder ───────────────────────────────────────
+function jnlDragStart(e, col) {
+  jnlDragCol = col;
+  e.dataTransfer.effectAllowed = 'move';
+}
+function jnlDragOver(e, col) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+}
+function jnlDrop(e, col) {
+  e.preventDefault();
+  if(!jnlDragCol || jnlDragCol === col) return;
+  const from = jnlColOrder.indexOf(jnlDragCol);
+  const to   = jnlColOrder.indexOf(col);
+  if(from >= 0 && to >= 0) {
+    jnlColOrder.splice(from, 1);
+    jnlColOrder.splice(to, 0, jnlDragCol);
+  }
+  jnlDragCol = null;
+  jnlRender();
+}
+
+// ── Export CSV ────────────────────────────────────────────────
+function jnlExportCSV() {
+  const data = jnlTab === 'closed' ? jnlClosedData : jnlOpenData;
+  if(!data.length) { alert('No data to export'); return; }
+  const keys = Object.keys(data[0]);
+  const csv  = [keys.join(','), ...data.map(r => keys.map(k => JSON.stringify(r[k]||'')).join(','))].join('\n');
+  const a    = document.createElement('a');
+  a.href     = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = `claude-market-${jnlTab}-trades-${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  addLog('CSV exported: ' + data.length + ' trades', 'ok');
+}
+
+// ── Auto-load when tab is opened ──────────────────────────────
+const _origShowPage = window.showPage;
+window.showPageJnl = function(id, btn) {
+  if(typeof _origShowPage === 'function') _origShowPage(id, btn);
+  if(id === 'journal') jnlRefresh();
+};
+
+// Load journal data on startup
+setTimeout(jnlRefresh, 3000);
+</script>
+</div>
+</body>
+</html>
+
 </div>
 </body>
 </html>
