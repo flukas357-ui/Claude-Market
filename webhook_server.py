@@ -1,5 +1,5 @@
 """
-Claude-Market Webhook Server v5.2 
+Claude-Market Webhook Server v5.2
 Lukas Ferreira - Pretoria ZA
 Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
 Model: claude-sonnet-4-5
@@ -13,7 +13,11 @@ import json
 from datetime import datetime, timedelta
 import os
 
+app = Flask(__name__)
+client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
+# ─── CORS — allow Command Centre to fetch from any origin ─────────────────────
+@app.after_request
 def add_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
@@ -463,4 +467,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     print(f"Claude-Market Webhook Server v5.0 — port {port}")
     app.run(host="0.0.0.0", port=port)
-
