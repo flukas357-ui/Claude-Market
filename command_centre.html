@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1531,7 +1532,7 @@ addLog('Connecting to ' + WEBHOOK, 'info');
         <button class="jnl-btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text)" onclick="toggleColDropdown()">⚙ Columns</button>
         <div class="col-dropdown" id="col-dropdown"></div>
       </div>
-      <button class="jnl-btn btn-send" onclick="jnlRefresh()">🔄 Refresh</button>
+      <button class="jnl-btn btn-send" onclick="jnlRefresh();addLog('Refreshing journal...','info')">🔄 Refresh</button>
     </div>
   </div>
 
@@ -2027,10 +2028,6 @@ window.showPageJnl = function(id, btn) {
 // Load journal data on startup
 setTimeout(jnlRefresh, 3000);
 </script>
-</div>
-</body>
-</html>
-
 </div>
 </body>
 </html>
