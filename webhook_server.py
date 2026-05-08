@@ -13,11 +13,7 @@ import json
 from datetime import datetime, timedelta
 import os
 
-app = Flask(__name__)
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
-# ─── CORS — allow Command Centre to fetch from any origin ─────────────────────
-@app.after_request
 def add_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
