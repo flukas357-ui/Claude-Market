@@ -465,6 +465,6 @@ threading.Thread(target=scanner_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v5.0 — port {port}")
+    print(f"Claude-Market Webhook Server v5.2 — port {port}")
     app.run(host="0.0.0.0", port=port)
 
