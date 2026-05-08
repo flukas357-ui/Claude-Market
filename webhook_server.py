@@ -1,5 +1,5 @@
 """
-Claude-Market Webhook Server v5.2
+Claude-Market Webhook Server v5.2 
 Lukas Ferreira - Pretoria ZA
 Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
 Model: claude-sonnet-4-5
