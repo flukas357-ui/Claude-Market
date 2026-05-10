@@ -1492,6 +1492,21 @@ addLog('Connecting to ' + WEBHOOK, 'info');
 .jnl-sum-card { background:var(--bg3); border:1px solid var(--border); border-radius:8px; padding:10px; text-align:center; }
 .jnl-sum-label { font-size:0.68rem; color:var(--muted); margin-bottom:3px; text-transform:uppercase; }
 .jnl-sum-val   { font-size:1.1rem; font-weight:700; }
+
+/* Trade details modal */
+.jnl-modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:9999; align-items:center; justify-content:center; }
+.jnl-modal.open { display:flex; }
+.jnl-modal-content { background:var(--bg2); border:2px solid var(--border); border-radius:12px; max-width:600px; width:90%; max-height:90vh; overflow-y:auto; padding:0; box-shadow:0 12px 48px rgba(0,0,0,0.6); }
+.jnl-modal-header { padding:16px 20px; border-bottom:2px solid var(--border); display:flex; justify-content:space-between; align-items:center; background:var(--bg3); }
+.jnl-modal-title { font-size:1.1rem; font-weight:700; }
+.jnl-modal-close { background:none; border:none; color:var(--muted); font-size:1.5rem; cursor:pointer; padding:0; width:30px; height:30px; line-height:1; }
+.jnl-modal-close:hover { color:var(--text); }
+.jnl-modal-body { padding:20px; }
+.jnl-detail-row { display:grid; grid-template-columns:140px 1fr; gap:12px; padding:8px 0; border-bottom:1px solid var(--border); font-size:0.85rem; }
+.jnl-detail-row:last-child { border-bottom:none; }
+.jnl-detail-label { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:0.72rem; letter-spacing:0.5px; }
+.jnl-detail-value { color:var(--text); font-weight:500; }
+.jnl-section-title { font-weight:700; font-size:0.9rem; margin:16px 0 8px 0; padding-top:12px; border-top:2px solid var(--border); }
 </style>
 
 <div class="jnl-wrap">
@@ -1563,6 +1578,17 @@ addLog('Connecting to ' + WEBHOOK, 'info');
 
   <div id="jnl-exposure-tab" style="display:none;margin-top:12px">
     <div class="card" id="jnl-exposure-content"></div>
+  </div>
+
+  <!-- Trade Details Modal -->
+  <div class="jnl-modal" id="jnl-trade-modal">
+    <div class="jnl-modal-content">
+      <div class="jnl-modal-header">
+        <div class="jnl-modal-title" id="jnl-modal-title">Trade Details</div>
+        <button class="jnl-modal-close" onclick="closeTradeModal()">×</button>
+      </div>
+      <div class="jnl-modal-body" id="jnl-modal-body"></div>
+    </div>
   </div>
 </div>
 
@@ -1788,7 +1814,7 @@ function renderOpenTable() {
     const fmt  = n => parseFloat(n||0).toFixed(digs);
     const bal  = t.balance || 10000;
     const pctStr = (t.profit/bal*100).toFixed(2) + '%';
-    return `<tr onclick="this.classList.toggle('selected')">${cols.map(c => {
+    return `<tr onclick="this.classList.toggle('selected')" oncontextmenu="event.preventDefault();showTradeDetails(${JSON.stringify(t).replace(/"/g,'&quot;')},false);return false;">${cols.map(c => {
       switch(c) {
         case 'ticket':   return `<td style="color:var(--muted);font-size:0.78rem">#${t.ticket}</td>`;
         case 'time':     return `<td style="font-size:0.78rem;color:var(--muted)">${t.time}</td>`;
@@ -1839,7 +1865,7 @@ function renderClosedTable() {
   tbody.innerHTML = data.map((t,i) => {
     const digs = t.entry > 100 ? 2 : t.entry > 1 ? 4 : 5;
     const fmt  = n => parseFloat(n||0).toFixed(digs);
-    return `<tr onclick="this.classList.toggle('selected')">${cols.map(c => {
+    return `<tr onclick="this.classList.toggle('selected')" oncontextmenu="event.preventDefault();showTradeDetails(${JSON.stringify(t).replace(/"/g,'&quot;')},true);return false;">${cols.map(c => {
       switch(c) {
         case 'ticket':     return `<td style="color:var(--muted);font-size:0.78rem">#${t.ticket}</td>`;
         case 'time':       return `<td style="font-size:0.78rem;color:var(--muted)">${t.time}</td>`;
@@ -1866,12 +1892,12 @@ function renderClosedTable() {
 // ── Exposure Tab ──────────────────────────────────────────────
 function jnlRenderExposure() {
   const el = document.getElementById('jnl-exposure-content');
-  if(!jnlOpenData.length) {
-    el.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">No open positions — exposure is zero</div>';
+  if(!jnlOpenData.length && !jnlClosedData.length) {
+    el.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">No positions or history — exposure is zero</div>';
     return;
   }
 
-  // Group by symbol
+  // Current open exposure
   const bySymbol = {};
   jnlOpenData.forEach(t => {
     if(!bySymbol[t.symbol]) bySymbol[t.symbol] = { lots:0, profit:0, spent:0, buy:0, sell:0 };
@@ -1883,11 +1909,22 @@ function jnlRenderExposure() {
   });
 
   const totalSpent = Object.values(bySymbol).reduce((s,v) => s + v.spent, 0);
-  const maxLots    = Math.max(...Object.values(bySymbol).map(v => v.lots));
+  const maxLots    = Math.max(...Object.values(bySymbol).map(v => v.lots), 0.01);
 
-  el.innerHTML = `
-    <div class="card-title" style="margin-bottom:14px">🎯 Exposure Per Asset — ${Object.keys(bySymbol).length} assets open</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+  // Historical stats per symbol
+  const symbolStats = {};
+  jnlClosedData.forEach(t => {
+    if(!symbolStats[t.symbol]) symbolStats[t.symbol] = { total:0, wins:0, losses:0, netProfit:0 };
+    symbolStats[t.symbol].total++;
+    if(t.profit >= 0) symbolStats[t.symbol].wins++;
+    else              symbolStats[t.symbol].losses++;
+    symbolStats[t.symbol].netProfit += t.profit;
+  });
+
+  // Open exposure section
+  const openSection = Object.keys(bySymbol).length > 0 ? `
+    <div class="card-title" style="margin-bottom:14px">🎯 Current Open Exposure — ${Object.keys(bySymbol).length} assets</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:30px">
       <div>
         <div style="font-size:0.75rem;color:var(--muted);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">Position Size by Asset</div>
         ${Object.entries(bySymbol).map(([sym, v]) => `
@@ -1917,7 +1954,35 @@ function jnlRenderExposure() {
           <span style="font-weight:700;color:var(--yellow)">$${totalSpent.toFixed(2)}</span>
         </div>
       </div>
-    </div>`;
+    </div>` : '';
+
+  // Historical stats section
+  const statsSection = Object.keys(symbolStats).length > 0 ? `
+    <div style="border-top:2px solid var(--border);padding-top:20px;margin-top:10px">
+      <div class="card-title" style="margin-bottom:14px">📊 Symbol Performance — Historical Win Rate & Net P/L</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+        ${Object.entries(symbolStats).sort((a,b) => b[1].netProfit - a[1].netProfit).map(([sym, s]) => {
+          const winRate = s.total > 0 ? ((s.wins / s.total) * 100).toFixed(0) : 0;
+          const netColor = s.netProfit >= 0 ? 'var(--green)' : 'var(--red)';
+          return `
+          <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <span style="font-weight:700;font-size:0.95rem">${sym}</span>
+              <span style="color:${netColor};font-weight:700;font-size:0.9rem">${s.netProfit>=0?'+':''}$${Math.abs(s.netProfit).toFixed(0)}</span>
+            </div>
+            <div style="font-size:0.75rem;color:var(--muted);margin-bottom:4px">
+              ${s.total} trade${s.total===1?'':'s'} | Win rate: ${winRate}%
+            </div>
+            <div style="display:flex;gap:8px;font-size:0.72rem">
+              <span style="color:var(--green)">✓ ${s.wins} wins</span>
+              <span style="color:var(--red)">✗ ${s.losses} losses</span>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
+  el.innerHTML = `${openSection}${statsSection}${!openSection && !statsSection ? '<div style="text-align:center;padding:30px;color:var(--muted)">No exposure data available</div>' : ''}`;
 }
 
 // ── Actions ───────────────────────────────────────────────────
@@ -2017,6 +2082,119 @@ function jnlExportCSV() {
   addLog('CSV exported: ' + data.length + ' trades', 'ok');
 }
 
+// ── Trade Details Modal ───────────────────────────────────────
+function showTradeDetails(trade, isClosed) {
+  const modal = document.getElementById('jnl-trade-modal');
+  const title = document.getElementById('jnl-modal-title');
+  const body  = document.getElementById('jnl-modal-body');
+
+  title.textContent = `Trade Details — Ticket #${trade.ticket}`;
+
+  const digs = trade.entry > 100 ? 2 : trade.entry > 1 ? 4 : 5;
+  const fmt  = n => parseFloat(n||0).toFixed(digs);
+  const pct  = (trade.profit / (trade.balance || 10000) * 100).toFixed(2);
+  const profitColor = trade.profit >= 0 ? 'var(--green)' : 'var(--red)';
+  const profitSign  = trade.profit >= 0 ? '+' : '';
+
+  body.innerHTML = `
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Symbol</div>
+      <div class="jnl-detail-value" style="font-weight:700;font-size:1.05rem">${trade.symbol}</div>
+    </div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Type</div>
+      <div class="jnl-detail-value"><span class="${trade.type==='BUY'?'jnl-buy':'jnl-sell'}">${trade.type}</span></div>
+    </div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Strategy</div>
+      <div class="jnl-detail-value">${stratBadge(trade.strategy)}</div>
+    </div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Volume</div>
+      <div class="jnl-detail-value">${trade.lots.toFixed(2)} lots</div>
+    </div>
+    
+    <div class="jnl-section-title">📈 Price Levels</div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Entry Price</div>
+      <div class="jnl-detail-value">${fmt(trade.entry)}</div>
+    </div>
+    ${isClosed ? `
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Close Price</div>
+      <div class="jnl-detail-value" style="color:var(--blue)">${fmt(trade.closeprice)}</div>
+    </div>` : `
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Current Price</div>
+      <div class="jnl-detail-value" style="color:var(--blue)">${fmt(trade.current || trade.entry)}</div>
+    </div>`}
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Stop Loss</div>
+      <div class="jnl-detail-value" style="color:var(--red)">${fmt(trade.sl)}</div>
+    </div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Take Profit</div>
+      <div class="jnl-detail-value" style="color:var(--green)">${fmt(trade.tp)}</div>
+    </div>
+    
+    <div class="jnl-section-title">💰 Financial Details</div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Capital Deployed</div>
+      <div class="jnl-detail-value" style="color:var(--yellow);font-weight:700">$${parseFloat(trade.spent||0).toFixed(2)}</div>
+    </div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Swap Fees</div>
+      <div class="jnl-detail-value" style="color:var(--muted)">$${parseFloat(trade.swap||0).toFixed(2)}</div>
+    </div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Current P&L</div>
+      <div class="jnl-detail-value" style="color:${profitColor};font-weight:700;font-size:1.1rem">${profitSign}$${Math.abs(trade.profit).toFixed(2)} (${profitSign}${pct}%)</div>
+    </div>
+    
+    ${!isClosed && trade.trail ? `
+    <div class="jnl-section-title">🎯 Trailing Stop</div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Current Level</div>
+      <div class="jnl-detail-value">${trailBadge(trade.trail)}</div>
+    </div>` : ''}
+    
+    <div class="jnl-section-title">⏰ Timing</div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Opened</div>
+      <div class="jnl-detail-value">${trade.time}</div>
+    </div>
+    ${isClosed ? `
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Closed</div>
+      <div class="jnl-detail-value">${trade.closetime}</div>
+    </div>` : ''}
+    
+    ${trade.comment ? `
+    <div class="jnl-section-title">📝 Comments</div>
+    <div class="jnl-detail-row">
+      <div class="jnl-detail-label">Notes</div>
+      <div class="jnl-detail-value" style="font-size:0.8rem;color:var(--muted)">${trade.comment}</div>
+    </div>` : ''}
+  `;
+
+  modal.classList.add('open');
+}
+
+function closeTradeModal() {
+  document.getElementById('jnl-trade-modal').classList.remove('open');
+}
+
+// Close modal on background click
+document.addEventListener('click', e => {
+  const modal = document.getElementById('jnl-trade-modal');
+  if(e.target === modal) closeTradeModal();
+});
+
+// Close modal on Escape key
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape') closeTradeModal();
+});
+
 // ── Auto-load when tab is opened ──────────────────────────────
 const _origShowPage = window.showPage;
 window.showPageJnl = function(id, btn) {
@@ -2030,3 +2208,4 @@ setTimeout(jnlRefresh, 3000);
 </div>
 </body>
 </html>
+
