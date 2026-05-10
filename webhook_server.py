@@ -1,4 +1,4 @@
-""" 
+"""
 Claude-Market Webhook Server v5.2
 Lukas Ferreira - Pretoria ZA
 Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
@@ -245,7 +245,7 @@ def _claude_validate(symbol, action, price, sig_type):
         )
         text = resp.content[0].text.strip()
         score = int("".join(c for c in text if c.isdigit())[:1])
-        return max(1, min(5, score))
+        return max(1, min(5, score))  # Cap at 1-5
     except Exception as e:
         print(f"[VALIDATE ERROR] {e}")
         return 3  # Default mid-score on failure
@@ -416,6 +416,7 @@ def run_scanner():
         sym    = global_winner.get("symbol", "")
         action = str(global_winner.get("action", "BUY")).upper()
         score  = int(global_winner.get("score", 3))
+        score  = max(1, min(5, score))  # Cap at 1-5
         conf   = global_winner.get("confidence", "MEDIUM")
 
         print(f"[SCANNER] ★ GLOBAL WINNER: {sym} {action} Score:{score} Confidence:{conf}")
