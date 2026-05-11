@@ -1,8 +1,8 @@
 """
-Claude-Market Webhook Server v5.4
+Claude-Market Webhook Server v5.5
 Lukas Ferreira - Pretoria ZA
 Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
-v5.4: Added /history/delete endpoint — deleted trades stay gone from Command Centre
+v5.5: deleted_tickets set — EA cannot re-post a trade the user deleted
 Model: claude-sonnet-4-6
 """
 
@@ -35,6 +35,7 @@ pending_signal   = None          # Signal waiting for EA to pick up
 trading_enabled  = True          # Kill switch
 mt5_status       = {}            # Latest data posted by EA
 trade_history    = []            # Closed trades from EA (last 200)
+deleted_tickets  = set()         # v5.5: tickets the user deleted — EA cannot re-add these
 scan_results     = {             # Scanner intelligence data
     "last_run": None,
     "next_run": None,
@@ -61,7 +62,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "5.4",
+        "version": "5.5",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -184,8 +185,11 @@ def post_history():
     global trade_history
     try:
         data = request.get_json(force=True)
-        ticket = data.get("ticket")
-        if ticket and ticket not in [x.get("ticket") for x in trade_history]:
+        ticket = str(data.get("ticket", ""))
+        if ticket in deleted_tickets:
+            print(f"[HISTORY] Ticket {ticket} was deleted by user — rejecting re-post")
+            return jsonify({"ok": True, "skipped": "deleted by user"})
+        if ticket and ticket not in [str(x.get("ticket", "")) for x in trade_history]:
             data["received_at"] = datetime.utcnow().isoformat()
             trade_history.insert(0, data)
             trade_history = trade_history[:200]
@@ -200,17 +204,19 @@ def post_history():
 # ─── Kill Switch ───────────────────────────────────────────────────────────────
 @app.route("/history/delete", methods=["POST"])
 def delete_history():
-    """Command Centre calls this when user deletes a closed trade — removes it permanently"""
-    global trade_history
+    """Command Centre calls this when user deletes a closed trade — removed permanently"""
+    global trade_history, deleted_tickets
     try:
         data = request.get_json(force=True)
-        ticket = data.get("ticket")
+        ticket = str(data.get("ticket", ""))
+        removed = 0
         if ticket:
+            deleted_tickets.add(ticket)           # v5.5: block EA from re-posting
             before = len(trade_history)
-            trade_history = [t for t in trade_history if str(t.get("ticket")) != str(ticket)]
+            trade_history = [t for t in trade_history if str(t.get("ticket", "")) != ticket]
             removed = before - len(trade_history)
-            print(f"[HISTORY] Deleted ticket {ticket} ({removed} record(s) removed)")
-        return jsonify({"ok": True, "removed": removed if ticket else 0})
+            print(f"[HISTORY] Deleted ticket {ticket} ({removed} record(s) removed, {len(deleted_tickets)} total blocked)")
+        return jsonify({"ok": True, "removed": removed})
     except Exception as e:
         print(f"[ERROR] /history/delete: {e}")
         return jsonify({"error": str(e)}), 500
@@ -488,6 +494,5 @@ threading.Thread(target=scanner_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v5.4 — port {port}")
+    print(f"Claude-Market Webhook Server v5.5 — port {port}")
     app.run(host="0.0.0.0", port=port)
-
