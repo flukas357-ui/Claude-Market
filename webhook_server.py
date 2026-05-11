@@ -1,4 +1,4 @@
-"""
+""" 
 Claude-Market Webhook Server v6.0
 Lukas Ferreira - Pretoria ZA
 Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
