@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Claude-Market Command Centre v4.4</title>
+<title>Claude-Market Command Centre v4.5</title>
 <style>
   :root {
     --bg: #0a0e1a; --bg2: #111827; --bg3: #1e2736;
@@ -162,7 +162,7 @@
 <div class="topbar">
   <div>
     <div class="logo">⚡ CLAUDE-MARKET</div>
-    <div class="version">Command Centre v4.4 | Lukas Ferreira — Pretoria 🇿🇦</div>
+    <div class="version">Command Centre v4.5 | Lukas Ferreira — Pretoria 🇿🇦</div>
   </div>
   <button class="kill-switch kill-on" id="killSwitch" onclick="toggleKillSwitch()">
     🟢 TRADING ACTIVE
@@ -660,7 +660,7 @@
         <tr>
           <td>🖥️ Command Centre</td>
           <td style="font-family:monospace;font-size:0.82rem">command_centre.html</td>
-          <td><span style="color:var(--yellow);font-weight:700">v4.4</span></td>
+          <td><span style="color:var(--yellow);font-weight:700">v4.5</span></td>
           <td style="font-size:0.8rem;color:var(--muted)">Desktop (local)</td>
           <td style="font-size:0.8rem;color:var(--muted)">May 2026</td>
         </tr>
@@ -1243,7 +1243,7 @@ pollMT5Status();
 setInterval(pollWebhook,   30000);  // every 30s
 setInterval(pollMT5Status, 15000);  // every 15s
 
-addLog('Command Centre v4.4 started', 'ok');
+addLog('Command Centre v4.5 started', 'ok');
 addLog('Connecting to ' + WEBHOOK, 'info');
 </script>
 
@@ -1601,7 +1601,18 @@ let jnlSortCol   = 'time';
 let jnlSortDir   = 'desc';
 let jnlOpenData  = [];
 let jnlClosedData= [];
-let deletedTickets = new Set(); // v4.4: tracks deleted tickets so they don't come back on refresh
+
+// v4.5 FIX: deletedTickets backed by localStorage — survives page reloads
+// Converts ticket to string for consistent comparison
+const DELETED_KEY = 'cm_deleted_tickets';
+function loadDeletedTickets() {
+  try { return new Set(JSON.parse(localStorage.getItem(DELETED_KEY) || '[]').map(String)); }
+  catch(e) { return new Set(); }
+}
+function saveDeletedTickets(set) {
+  try { localStorage.setItem(DELETED_KEY, JSON.stringify([...set])); } catch(e) {}
+}
+let deletedTickets = loadDeletedTickets();
 let jnlColOrder  = ['ticket','time','symbol','type','strategy','lots','entry','current','sl','tp','spent','swap','profit','pct','trail'];
 let jnlColVis    = {ticket:true,time:true,symbol:true,type:true,strategy:true,lots:true,entry:true,current:true,sl:true,tp:true,spent:true,swap:false,profit:true,pct:true,trail:true};
 let jnlDragCol   = null;
@@ -1683,10 +1694,10 @@ async function jnlRefresh() {
       const hr = await fetch(WEBHOOK + '/history');
       if(hr.ok) {
         const hd = await hr.json();
-        const existing = jnlClosedData.map(x => x.ticket);
+        const existing = jnlClosedData.map(x => String(x.ticket));
         (hd.trades || []).forEach(t => {
-          if(deletedTickets.has(t.ticket)) return; // v4.4: skip deleted
-          if(!existing.includes(t.ticket)) {
+          if(deletedTickets.has(String(t.ticket))) return; // v4.5: persists across reloads via localStorage
+          if(!existing.includes(String(t.ticket))) {
             jnlClosedData.unshift({
               ticket:     t.ticket,
               time:       t.open_time || '--',
@@ -1988,22 +1999,28 @@ function jnlRenderExposure() {
 }
 
 // ── Actions ───────────────────────────────────────────────────
-// ── Delete Closed Trade — v4.4: also removes from webhook so it stays gone ───
+// ── Delete Closed Trade — v4.5: localStorage + webhook so deletion survives reloads ──
 async function jnlDeleteClosed(idx, e) {
   e.stopPropagation();
   if(!confirm('Delete this closed trade from journal?')) return;
 
-  const trade = jnlClosedData[idx];
-  const ticket = trade ? trade.ticket : null;
+  const trade  = jnlClosedData[idx];
+  const ticket = trade ? String(trade.ticket) : null;
 
-  // 1. Remove from local array immediately — UI updates at once
+  // 1. Remove from local array immediately
   jnlClosedData.splice(idx, 1);
-  if(ticket) deletedTickets.add(ticket); // remember it so refresh won't bring it back
+
+  // 2. Save to localStorage — survives page reload
+  if(ticket) {
+    deletedTickets.add(ticket);
+    saveDeletedTickets(deletedTickets);
+  }
+
   jnlUpdateSummary();
   renderClosedTable();
   addLog('Closed trade #' + ticket + ' deleted', 'info');
 
-  // 2. Tell webhook to remove it from /history so it never comes back
+  // 3. Tell webhook to remove it — so the EA cannot re-post it back
   if(ticket) {
     try {
       const resp = await fetch(WEBHOOK + '/history/delete', {
@@ -2011,13 +2028,10 @@ async function jnlDeleteClosed(idx, e) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ticket: ticket })
       });
-      if(resp.ok) {
-        addLog('Trade #' + ticket + ' removed from webhook history ✅', 'ok');
-      } else {
-        addLog('Webhook delete failed — trade hidden locally only', 'warn');
-      }
+      if(resp.ok) addLog('Trade #' + ticket + ' removed from webhook ✅', 'ok');
+      else addLog('Webhook delete failed — hidden locally via localStorage', 'warn');
     } catch(err) {
-      addLog('Could not reach webhook to delete — trade hidden locally only', 'warn');
+      addLog('Could not reach webhook — hidden locally via localStorage', 'warn');
     }
   }
 }
