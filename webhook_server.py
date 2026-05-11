@@ -1,8 +1,9 @@
 """
-Claude-Market Webhook Server v5.2
+Claude-Market Webhook Server v5.3
 Lukas Ferreira - Pretoria ZA
 Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
-Model: claude-sonnet-4-5
+v5.3: Updated to match EA v8.3 — source field support in /history POST
+Model: claude-sonnet-4-6
 """
 
 from flask import Flask, request, jsonify
@@ -60,7 +61,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "5.2",
+        "version": "5.3",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -77,7 +78,7 @@ def root():
 def test_apikey():
     try:
         resp = client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=10,
             messages=[{"role":"user","content":"Reply with OK"}]
         )
@@ -179,7 +180,7 @@ def get_history():
 
 @app.route("/history", methods=["POST"])
 def post_history():
-    """EA can POST a closed trade directly"""
+    """EA can POST a closed trade directly (v8.3: includes source field MANUAL/EA)"""
     global trade_history
     try:
         data = request.get_json(force=True)
@@ -188,6 +189,10 @@ def post_history():
             data["received_at"] = datetime.utcnow().isoformat()
             trade_history.insert(0, data)
             trade_history = trade_history[:200]
+            source = data.get("source", "EA")
+            symbol = data.get("symbol", "?")
+            profit = data.get("profit", 0)
+            print(f"[HISTORY] Received closed trade: {symbol} ${profit:.2f} [{source}]")
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -231,7 +236,7 @@ def _claude_validate(symbol, action, price, sig_type):
     """Ask Claude AI to score a signal 1-5"""
     try:
         resp = client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=50,
             messages=[{
                 "role": "user",
@@ -255,7 +260,7 @@ def _scan_group(group_name, assets):
     try:
         asset_list = ", ".join(assets)
         resp = client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=200,
             messages=[{
                 "role": "user",
@@ -288,7 +293,7 @@ def _pick_group_winner(group_name, top5, recently):
         avoid = ", ".join(recently) if recently else "none"
         candidates = ", ".join(top5)
         resp = client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=200,
             messages=[{
                 "role": "user",
@@ -324,7 +329,7 @@ def _pick_global_winner(group_winners, recently):
         candidates_json = json.dumps(group_winners, indent=2)
         avoid = ", ".join(recently) if recently else "none"
         resp = client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=300,
             messages=[{
                 "role": "user",
@@ -466,6 +471,5 @@ threading.Thread(target=scanner_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v5.2 — port {port}")
+    print(f"Claude-Market Webhook Server v5.3 — port {port}")
     app.run(host="0.0.0.0", port=port)
-
