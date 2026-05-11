@@ -1,8 +1,11 @@
 """
-Claude-Market Webhook Server v5.5 
+Claude-Market Webhook Server v6.0
 Lukas Ferreira - Pretoria ZA
 Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
-v5.5: deleted_tickets set — EA cannot re-post a trade the user deleted
+v6.0: AUTONOMOUS — self-ping keeps Render awake 24/7, scanner never stops
+      Fixed Ava broker symbol names (US_TECH100, US_500, US_30, GERMANY_40)
+      Scanner fires both RANGE and BB_BREAKOUT signals
+      Added /ping endpoint + /signal/close for future auto-close
 Model: claude-sonnet-4-6
 """
 
@@ -11,6 +14,7 @@ import anthropic
 import threading
 import time
 import json
+import urllib.request
 from datetime import datetime, timedelta
 import os
 
@@ -32,6 +36,7 @@ def handle_options(path=""):
 
 # ─── State ────────────────────────────────────────────────────────────────────
 pending_signal   = None          # Signal waiting for EA to pick up
+close_signal     = None          # Close signal for EA (future auto-close)
 trading_enabled  = True          # Kill switch
 mt5_status       = {}            # Latest data posted by EA
 trade_history    = []            # Closed trades from EA (last 200)
@@ -47,14 +52,14 @@ scan_results     = {             # Scanner intelligence data
 recently_traded  = []
 scan_lock        = threading.Lock()
 
-# ─── Asset Universe (54 assets across 6 groups) ───────────────────────────────
+# ─── Asset Universe — Ava broker symbol names ─────────────────────────────────
 ASSET_GROUPS = {
     "Forex Majors":  ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURGBP","EURJPY"],
     "Forex Minors":  ["GBPJPY","AUDJPY","CADJPY","CHFJPY","EURAUD","EURNZD","GBPAUD","AUDCAD","NZDCAD"],
-    "Indices":       ["NAS100","US500","US30","GER40","UK100","JPN225","AUS200","FRA40","HKG50"],
-    "Commodities":   ["GOLD","SILVER","USOIL","COPPER","NATGAS","PLATINUM","PALLADIUM","WHEAT","COFFEE"],
-    "Crypto":        ["BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOTUSD","AVAXUSD","LINKUSD"],
-    "SA & Emerging": ["USDZAR","EURZAR","GBPZAR","XAUUSD","USDMXN","USDBRL","USDTRY","USDCNH"]
+    "Indices":       ["US_TECH100","US_500","US_30","GERMANY_40","UK_100","JAPAN_225","FRANCE_40"],
+    "Commodities":   ["GOLD","SILVER","CrudeOIL","COPPER","USDZAR"],
+    "Crypto":        ["BTCUSD","ETHUSD"],
+    "SA & Emerging": ["USDZAR","EURZAR","GBPZAR"]
 }
 
 # ─── Health Check ─────────────────────────────────────────────────────────────
@@ -62,13 +67,13 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "5.5",
+        "version": "6.0",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
         "last_scan": scan_results["last_run"],
         "next_scan": scan_results["next_run"],
-        "assets_monitored": 54,
+        "assets_monitored": sum(len(v) for v in ASSET_GROUPS.values()),
         "groups": list(ASSET_GROUPS.keys()),
         "mt5_connected": bool(mt5_status.get("timestamp")),
         "timestamp": datetime.utcnow().isoformat()
@@ -254,6 +259,47 @@ def manual_scan():
     threading.Thread(target=run_scanner, daemon=True).start()
     return jsonify({"status": "Scanner triggered manually"})
 
+# ─── Keep-alive ping endpoint ─────────────────────────────────────────────────
+@app.route("/ping", methods=["GET"])
+def ping():
+    """Self-ping endpoint — keeps Render awake 24/7"""
+    return jsonify({
+        "alive": True,
+        "time": datetime.utcnow().isoformat(),
+        "scanner_last_run": scan_results.get("last_run"),
+        "scanner_next_run": scan_results.get("next_run"),
+        "trading": trading_enabled
+    })
+
+# ─── Close Signal (future auto-close support) ─────────────────────────────────
+@app.route("/signal/close", methods=["POST"])
+def post_close_signal():
+    """Command Centre or server can send a close signal for a specific symbol"""
+    global close_signal
+    try:
+        data = request.get_json(force=True)
+        symbol = data.get("symbol","").upper()
+        reason = data.get("reason","Manual close request")
+        if not symbol:
+            return jsonify({"error":"Missing symbol"}), 400
+        close_signal = {"symbol": symbol, "reason": reason,
+                        "timestamp": datetime.utcnow().isoformat()}
+        print(f"[CLOSE] Signal set for {symbol} — {reason}")
+        return jsonify({"ok": True, "symbol": symbol})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/signal/close", methods=["GET"])
+def get_close_signal():
+    """EA polls this for close requests"""
+    global close_signal
+    if not close_signal:
+        return jsonify({"close": False})
+    sig = close_signal
+    close_signal = None
+    print(f"[CLOSE] Signal delivered to EA: {sig['symbol']}")
+    return jsonify({"close": True, **sig})
+
 # ─── 3-Stage Global Scanner ───────────────────────────────────────────────────
 def _claude_validate(symbol, action, price, sig_type):
     """Ask Claude AI to score a signal 1-5"""
@@ -351,24 +397,28 @@ def _pick_global_winner(group_winners, recently):
     try:
         candidates_json = json.dumps(group_winners, indent=2)
         avoid = ", ".join(recently) if recently else "none"
+        utc_hour = datetime.utcnow().hour
+        session = "London/Frankfurt" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian/Off-hours"
         resp = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=300,
             messages=[{
                 "role": "user",
                 "content": (
-                    f"Claude-Market Range Scanner — Stage 3: Global Final.\n"
+                    f"Claude-Market Scanner — Stage 3: Global Final.\n"
+                    f"Current session: {session} ({utc_hour}:00 UTC)\n"
                     f"Group winners to compare:\n{candidates_json}\n"
                     f"Recently traded (avoid): {avoid}\n\n"
-                    f"Select the SINGLE BEST global ranging opportunity.\n"
-                    f"Score each on: confidence level, time of day suitability, "
-                    f"typical range width, broker availability.\n\n"
+                    f"Select the SINGLE BEST global trading opportunity.\n"
+                    f"Consider: session suitability, confidence, typical range width, volatility.\n"
+                    f"Set signal_type to RANGE if market is ranging/sideways, BB_BREAKOUT if trending/breaking.\n\n"
                     f"Reply ONLY with this JSON:\n"
-                    f"{{\"symbol\":\"SYM\",\"action\":\"BUY\",\"score\":5,"
-                    f"\"group\":\"GroupName\",\"support\":0.0,\"resistance\":0.0,"
+                    f"{{\"symbol\":\"SYM\",\"action\":\"BUY\",\"score\":4,"
+                    f"\"signal_type\":\"RANGE\",\"group\":\"GroupName\","
+                    f"\"support\":0.0,\"resistance\":0.0,"
                     f"\"confidence\":\"HIGH\",\"reason\":\"explanation\","
                     f"\"broker_available\":true}}\n"
-                    f"JSON only."
+                    f"action: BUY or SELL. score: 1-5. JSON only."
                 )
             }]
         )
@@ -441,21 +491,21 @@ def run_scanner():
             print("[SCANNER] No global winner selected")
             return
 
-        sym    = global_winner.get("symbol", "")
-        action = str(global_winner.get("action", "BUY")).upper()
-        score  = int(global_winner.get("score", 3))
-        score  = max(1, min(5, score))  # Cap at 1-5
-        conf   = global_winner.get("confidence", "MEDIUM")
+        sym      = global_winner.get("symbol", "")
+        action   = str(global_winner.get("action", "BUY")).upper()
+        score    = int(global_winner.get("score", 3))
+        score    = max(1, min(5, score))
+        conf     = global_winner.get("confidence", "MEDIUM")
+        sig_type = global_winner.get("signal_type", "RANGE").upper()
+        if sig_type not in ["RANGE", "BB_BREAKOUT"]: sig_type = "RANGE"
 
-        print(f"[SCANNER] ★ GLOBAL WINNER: {sym} {action} Score:{score} Confidence:{conf}")
+        print(f"[SCANNER] ★ GLOBAL WINNER: {sym} {action} Score:{score} Type:{sig_type} Conf:{conf}")
         scan_results["global_winner"] = global_winner
 
-        # Only trade on MEDIUM or HIGH confidence
         if conf not in ["MEDIUM", "HIGH"] or score < 3:
             print(f"[SCANNER] Confidence too low ({conf}) — no trade fired")
             return
 
-        # Check rotation
         if sym in recently_traded:
             print(f"[SCANNER] {sym} recently traded — rotation guard active")
             return
@@ -464,20 +514,19 @@ def run_scanner():
             print("[SCANNER] Signal already pending — skipping")
             return
 
-        # Fire the signal
         pending_signal = {
-            "symbol": sym,
-            "action": action,
-            "price": "0",
-            "score": str(score),
-            "signal_type": "RANGE_SCAN",
-            "confidence": conf,
-            "reason": global_winner.get("reason", ""),
-            "source": "scanner",
-            "timestamp": datetime.utcnow().isoformat()
+            "symbol":      sym,
+            "action":      action,
+            "price":       "0",
+            "score":       str(score),
+            "signal_type": sig_type,
+            "confidence":  conf,
+            "reason":      global_winner.get("reason", ""),
+            "source":      "scanner",
+            "timestamp":   datetime.utcnow().isoformat()
         }
-        _add_to_history(sym, action, score, "RANGE")
-        print(f"[SCANNER] Signal fired → {sym} {action}")
+        _add_to_history(sym, action, score, sig_type)
+        print(f"[SCANNER] ✅ Signal fired → {sym} {action} [{sig_type}] Score:{score}")
 
 # ─── Background Scanner Thread ─────────────────────────────────────────────────
 def scanner_loop():
@@ -489,10 +538,30 @@ def scanner_loop():
             print(f"[SCANNER ERROR] {e}")
         time.sleep(30 * 60)  # 30-minute cycle
 
-threading.Thread(target=scanner_loop, daemon=True).start()
+# ─── Self-Ping Thread — keeps Render free tier awake 24/7 ─────────────────────
+def self_ping_loop():
+    """Pings own /ping endpoint every 10 minutes — prevents Render sleep"""
+    time.sleep(120)  # Wait for server to fully start
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    if not render_url:
+        print("[PING] No RENDER_EXTERNAL_URL set — self-ping disabled (OK for local dev)")
+        return
+    ping_url = render_url.rstrip("/") + "/ping"
+    print(f"[PING] Self-ping active → {ping_url} every 10 min")
+    while True:
+        try:
+            urllib.request.urlopen(ping_url, timeout=15)
+            print(f"[PING] ✅ Render kept awake — {datetime.utcnow().strftime('%H:%M UTC')}")
+        except Exception as e:
+            print(f"[PING] ⚠️  Self-ping failed: {e}")
+        time.sleep(10 * 60)  # Every 10 minutes
+
+threading.Thread(target=scanner_loop,   daemon=True).start()
+threading.Thread(target=self_ping_loop, daemon=True).start()
 
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v5.5 — port {port}")
+    print(f"Claude-Market Webhook Server v6.0 — port {port}")
+    print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
