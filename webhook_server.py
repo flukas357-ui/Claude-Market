@@ -1,11 +1,9 @@
 """
-
-Claude-Market Webhook Server v6.1
+Claude-Market Webhook Server v6.2
 Lukas Ferreira - Pretoria ZA
-v6.1: Fixed Stage 1 + Stage 2 JSON parsing failures
-      Simplified Claude response format — no support/resistance required
-      Stage 2 always returns a winner (fallback if Claude fails)
-      Better error logging so failures are visible in Render logs
+v6.2: Scanner fires on ANY confidence level (LOW/MEDIUM/HIGH)
+      EA Smart Gates provide the real trade filter — no double blocking
+      Stage 2 prompt improved — cleaner JSON, no example symbol in template
 Model: claude-sonnet-4-6
 """
 
@@ -67,7 +65,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "6.1",
+        "version": "6.2",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -374,16 +372,18 @@ def _pick_group_winner(group_name, top5, recently):
             messages=[{
                 "role": "user",
                 "content": (
-                    f"Claude-Market Scanner Stage 2. Session: {session}.\n"
-                    f"Group: {group_name}. Candidates: {candidates}\n"
-                    f"Avoid recently traded: {avoid}\n\n"
-                    f"Pick the SINGLE BEST trading opportunity from the candidates.\n"
-                    f"Reply ONLY with this exact JSON:\n"
-                    f"{{\"symbol\":\"{top5[0]}\",\"action\":\"BUY\",\"confidence\":\"HIGH\","
-                    f"\"signal_type\":\"RANGE\",\"reason\":\"one line reason\"}}\n"
-                    f"action: BUY or SELL. confidence: LOW/MEDIUM/HIGH.\n"
-                    f"signal_type: RANGE or BB_BREAKOUT.\n"
-                    f"Use exact symbol from candidates. JSON only."
+                    f"You are a trading signal selector. Session: {session}.\n"
+                    f"Group: {group_name}\n"
+                    f"Choose ONE symbol from this list: {candidates}\n"
+                    f"Do not choose from recently traded: {avoid}\n\n"
+                    f"Respond with ONLY a JSON object. No explanation before or after.\n"
+                    f"Required fields:\n"
+                    f"- symbol: must be one of [{candidates}]\n"
+                    f"- action: BUY or SELL\n"
+                    f"- confidence: LOW, MEDIUM, or HIGH\n"
+                    f"- signal_type: RANGE or BB_BREAKOUT\n"
+                    f"- reason: brief explanation\n\n"
+                    f"JSON response:"
                 )
             }]
         )
@@ -549,8 +549,9 @@ def run_scanner():
         print(f"[SCANNER] ★ GLOBAL WINNER: {sym} {action} Score:{score} Type:{sig_type} Conf:{conf}")
         scan_results["global_winner"] = global_winner
 
-        if conf not in ["MEDIUM", "HIGH"] or score < 3:
-            print(f"[SCANNER] Confidence too low ({conf}) — no trade fired")
+        # v6.2: Fire on any confidence — EA Smart Gates provide the real filter
+        if score < 3:
+            print(f"[SCANNER] Score too low ({score}) — no trade fired")
             return
 
         if sym in recently_traded:
@@ -609,6 +610,6 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v6.1 — port {port}")
+    print(f"Claude-Market Webhook Server v6.2 — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
