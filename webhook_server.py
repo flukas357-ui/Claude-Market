@@ -1,4 +1,4 @@
-""" 
+"""
 Claude-Market Webhook Server v6.4
 Lukas Ferreira - Pretoria ZA
 v6.4: Fixed scanner stuck-on-EURUSD loop
@@ -8,7 +8,7 @@ v6.4: Fixed scanner stuck-on-EURUSD loop
       - Increased API call spacing to reduce rate limit failures
 Model: claude-sonnet-4-6
 """
-
+ 
 from flask import Flask, request, jsonify
 import anthropic
 import threading
@@ -17,10 +17,10 @@ import json
 import urllib.request
 from datetime import datetime, timedelta
 import os
-
+ 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-
+ 
 # ─── CORS — allow Command Centre to fetch from any origin ─────────────────────
 @app.after_request
 def add_cors(response):
@@ -28,12 +28,12 @@ def add_cors(response):
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
-
+ 
 @app.route("/", methods=["OPTIONS"])
 @app.route("/<path:path>", methods=["OPTIONS"])
 def handle_options(path=""):
     return "", 204
-
+ 
 # ─── State ────────────────────────────────────────────────────────────────────
 pending_signal   = None          # Signal waiting for EA to pick up
 close_signal     = None          # Close signal for EA (future auto-close)
@@ -51,7 +51,7 @@ scan_results     = {             # Scanner intelligence data
 }
 recently_traded  = {}  # {symbol: datetime} — 6-hour expiry rotation guard
 scan_lock        = threading.Lock()
-
+ 
 # ─── Asset Universe — Ava broker symbol names ─────────────────────────────────
 ASSET_GROUPS = {
     "Forex Majors":  ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURGBP","EURJPY"],
@@ -61,7 +61,7 @@ ASSET_GROUPS = {
     "Crypto":        ["BTCUSD","ETHUSD"],
     "SA & Emerging": ["USDZAR","EURZAR","GBPZAR"]
 }
-
+ 
 # ─── Health Check ─────────────────────────────────────────────────────────────
 @app.route("/", methods=["GET"])
 def root():
@@ -78,7 +78,7 @@ def root():
         "mt5_connected": bool(mt5_status.get("timestamp")),
         "timestamp": datetime.utcnow().isoformat()
     })
-
+ 
 # ─── API Key Test ─────────────────────────────────────────────────────────────
 @app.route("/test/apikey", methods=["GET"])
 def test_apikey():
@@ -91,7 +91,7 @@ def test_apikey():
         return jsonify({"status":"success","response":resp.content[0].text,"key_prefix":os.environ.get("ANTHROPIC_API_KEY","")[:12]+"..."})
     except Exception as e:
         return jsonify({"status":"error","error":str(e),"key_prefix":os.environ.get("ANTHROPIC_API_KEY","")[:12]+"..."})
-
+ 
 # ─── TradingView Webhook ───────────────────────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -100,27 +100,27 @@ def webhook():
         data = request.get_json(force=True)
         if not data:
             return jsonify({"error": "No JSON payload"}), 400
-
+ 
         secret = data.get("secret", "")
         if secret != "claude-market-2026":
             return jsonify({"error": "Invalid secret"}), 401
-
+ 
         symbol = str(data.get("ticker", data.get("symbol", ""))).upper().strip()
         action = str(data.get("action", "BUY")).upper().strip()
         price  = data.get("price", "0")
-
+ 
         if not symbol:
             return jsonify({"error": "Missing symbol"}), 400
         if action not in ["BUY", "SELL"]:
             return jsonify({"error": f"Invalid action: {action}"}), 400
-
+ 
         if not trading_enabled:
             return jsonify({"status": "blocked", "reason": "Kill switch active"}), 200
-
+ 
         score = _claude_validate(symbol, action, price, "BB")
         if score < 3:
             return jsonify({"status": "rejected", "reason": "Score too low", "score": score}), 200
-
+ 
         pending_signal = {
             "symbol": symbol,
             "action": action,
@@ -132,7 +132,7 @@ def webhook():
         }
         _add_to_history(symbol, action, score, "BB")
         print(f"[SIGNAL] TradingView → {symbol} {action} Score:{score}/5")
-
+ 
         return jsonify({
             "status": "signal_stored",
             "symbol": symbol,
@@ -143,7 +143,7 @@ def webhook():
     except Exception as e:
         print(f"[ERROR] /webhook: {e}")
         return jsonify({"error": str(e)}), 500
-
+ 
 # ─── EA Signal Poll ────────────────────────────────────────────────────────────
 @app.route("/signal", methods=["GET"])
 def get_signal():
@@ -154,7 +154,7 @@ def get_signal():
     pending_signal = None        # Clear once delivered
     print(f"[SIGNAL] Delivered to EA: {sig['symbol']} {sig['action']}")
     return jsonify({"signal": True, **sig})
-
+ 
 # ─── EA Status Receiver ────────────────────────────────────────────────────────
 @app.route("/status", methods=["POST"])
 def receive_status():
@@ -163,27 +163,27 @@ def receive_status():
         data = request.get_json(force=True)
         mt5_status = data
         mt5_status["received_at"] = datetime.utcnow().isoformat()
-
+ 
         # Extract closed trades if EA sends them
         for t in data.get("closed_trades", []):
             tickets = [x["ticket"] for x in trade_history]
             if t.get("ticket") not in tickets:
                 trade_history.insert(0, t)
         trade_history = trade_history[:200]  # Keep last 200
-
+ 
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+ 
 @app.route("/status", methods=["GET"])
 def send_status():
     return jsonify(mt5_status if mt5_status else {"connected": False})
-
+ 
 # ─── Trade History ─────────────────────────────────────────────────────────────
 @app.route("/history", methods=["GET"])
 def get_history():
     return jsonify({"trades": trade_history, "count": len(trade_history)})
-
+ 
 @app.route("/history", methods=["POST"])
 def post_history():
     """EA can POST a closed trade directly (v8.3: includes source field MANUAL/EA)"""
@@ -205,7 +205,7 @@ def post_history():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+ 
 # ─── Kill Switch ───────────────────────────────────────────────────────────────
 @app.route("/history/delete", methods=["POST"])
 def delete_history():
@@ -225,40 +225,44 @@ def delete_history():
     except Exception as e:
         print(f"[ERROR] /history/delete: {e}")
         return jsonify({"error": str(e)}), 500
-
-
+ 
+ 
 def stop_trading():
     global trading_enabled, pending_signal
     trading_enabled = False
     pending_signal  = None
     print("[KILL SWITCH] Trading STOPPED")
     return jsonify({"trading_enabled": False, "message": "All trading halted"})
-
+ 
 @app.route("/trading/resume", methods=["GET","POST"])
 def resume_trading():
     global trading_enabled
     trading_enabled = True
     print("[KILL SWITCH] Trading RESUMED")
     return jsonify({"trading_enabled": True, "message": "Trading resumed"})
-
+ 
 @app.route("/trading/status", methods=["GET"])
 def trading_status():
+    # v6.4: recently_traded is a dict internally — return keys as list for Command Centre
+    rt_list = list(recently_traded.keys())
     return jsonify({
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
-        "recently_traded": recently_traded
+        "recently_traded": rt_list
     })
-
+ 
 # ─── Scanner Intelligence Endpoints ───────────────────────────────────────────
 @app.route("/scanner/results", methods=["GET"])
 def scanner_results():
-    return jsonify(scan_results)
-
+    result = dict(scan_results)
+    result["recently_traded"] = list(recently_traded.keys())  # Always return as list
+    return jsonify(result)
+ 
 @app.route("/scanner/run", methods=["GET","POST"])
 def manual_scan():
     threading.Thread(target=run_scanner, daemon=True).start()
     return jsonify({"status": "Scanner triggered manually"})
-
+ 
 # ─── Keep-alive ping endpoint ─────────────────────────────────────────────────
 @app.route("/ping", methods=["GET"])
 def ping():
@@ -270,7 +274,7 @@ def ping():
         "scanner_next_run": scan_results.get("next_run"),
         "trading": trading_enabled
     })
-
+ 
 # ─── Close Signal (future auto-close support) ─────────────────────────────────
 @app.route("/signal/close", methods=["POST"])
 def post_close_signal():
@@ -288,7 +292,7 @@ def post_close_signal():
         return jsonify({"ok": True, "symbol": symbol})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+ 
 @app.route("/signal/close", methods=["GET"])
 def get_close_signal():
     """EA polls this for close requests"""
@@ -299,7 +303,7 @@ def get_close_signal():
     close_signal = None
     print(f"[CLOSE] Signal delivered to EA: {sig['symbol']}")
     return jsonify({"close": True, **sig})
-
+ 
 # ─── 3-Stage Global Scanner ───────────────────────────────────────────────────
 def _claude_validate(symbol, action, price, sig_type):
     """Ask Claude AI to score a signal 1-5"""
@@ -323,7 +327,7 @@ def _claude_validate(symbol, action, price, sig_type):
     except Exception as e:
         print(f"[VALIDATE ERROR] {e}")
         return 3  # Default mid-score on failure
-
+ 
 def _scan_group(group_name, assets):
     """Stage 1: Ask Claude to rank top 5 ranging assets in a group"""
     try:
@@ -360,7 +364,7 @@ def _scan_group(group_name, assets):
     except Exception as e:
         print(f"[SCAN1 ERROR] {group_name}: {e}")
     return assets[:3]  # Fallback
-
+ 
 def _pick_group_winner(group_name, top5, recently):
     """Stage 2: Pick the single best asset from a group's top candidates"""
     try:
@@ -421,7 +425,7 @@ def _pick_group_winner(group_name, top5, recently):
                 "signal_type":"RANGE","reason":"Fallback pick","support":0,"resistance":0}
     print(f"[SCAN2] {group_name} fallback → {top5[0]}")
     return fallback
-
+ 
 def _pick_global_winner(group_winners, recently):
     """Stage 3: Pick the best opportunity across all group winners"""
     try:
@@ -479,7 +483,7 @@ def _pick_global_winner(group_winners, recently):
         print(f"[SCAN3] Fallback → {w.get('symbol')}")
         return w
     return None
-
+ 
 def _add_to_history(symbol, action, score, sig_type):
     """Track recently traded assets for rotation"""
     global recently_traded
@@ -487,7 +491,7 @@ def _add_to_history(symbol, action, score, sig_type):
              "type": sig_type, "time": datetime.utcnow().isoformat()}
     scan_results["history"].insert(0, entry)
     scan_results["history"] = scan_results["history"][:20]
-
+ 
     # v6.4: recently_traded with 6-hour expiry
     recently_traded[symbol] = datetime.utcnow()
     # Remove symbols older than 6 hours
@@ -496,7 +500,7 @@ def _add_to_history(symbol, action, score, sig_type):
     for s in expired:
         del recently_traded[s]
         print(f"[ROTATION] {s} expired from rotation guard")
-
+ 
 def run_scanner():
     """Full 3-stage scan — runs every 30 minutes"""
     global pending_signal
@@ -504,11 +508,11 @@ def run_scanner():
         print(f"\n[SCANNER] Starting 3-stage scan — {datetime.utcnow().strftime('%H:%M UTC')}")
         scan_results["last_run"] = datetime.utcnow().isoformat()
         scan_results["next_run"] = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
-
+ 
         if not trading_enabled:
             print("[SCANNER] Skipped — kill switch active")
             return
-
+ 
         # ── STAGE 1: Scan all 6 groups ────────────────────────────────────────
         print("[SCANNER] Stage 1: Scanning 6 groups × 9 assets...")
         stage1 = {}
@@ -518,7 +522,7 @@ def run_scanner():
             print(f"  {group}: {top5}")
             time.sleep(1)  # Rate limit spacing
         scan_results["stage1"] = stage1
-
+ 
         # ── STAGE 2: Pick winner per group ────────────────────────────────────
         print("[SCANNER] Stage 2: Picking group winners...")
         stage2 = {}
@@ -530,19 +534,19 @@ def run_scanner():
                 print(f"  {group} winner: {winner.get('symbol')} {winner.get('action')} ({winner.get('confidence')})")
             time.sleep(1)
         scan_results["stage2"] = stage2
-
+ 
         # ── STAGE 3: Global champion ───────────────────────────────────────────
         if not stage2:
             print("[SCANNER] No group winners found")
             return
-
+ 
         print("[SCANNER] Stage 3: Selecting global champion...")
         global_winner = _pick_global_winner(list(stage2.values()), recently_traded)
-
+ 
         if not global_winner:
             print("[SCANNER] No global winner selected")
             return
-
+ 
         sym      = global_winner.get("symbol", "")
         action   = str(global_winner.get("action", "BUY")).upper()
         score    = int(global_winner.get("score", 3))
@@ -550,25 +554,25 @@ def run_scanner():
         conf     = global_winner.get("confidence", "MEDIUM")
         sig_type = global_winner.get("signal_type", "RANGE").upper()
         if sig_type not in ["RANGE", "BB_BREAKOUT"]: sig_type = "RANGE"
-
+ 
         print(f"[SCANNER] ★ GLOBAL WINNER: {sym} {action} Score:{score} Type:{sig_type} Conf:{conf}")
         scan_results["global_winner"] = global_winner
-
+ 
         # v6.3: Don't fire if score too low
         if score < 3:
             print(f"[SCANNER] Score too low ({score}) — no trade fired")
             return
-
+ 
         # v6.4: Check rotation guard with expiry-aware dict
         def is_recent(s): return s in recently_traded
-
+ 
         # v6.4: Don't fire if position already open on this symbol
         open_positions = mt5_status.get("positions", [])
         open_symbols   = [str(p.get("symbol","")).upper() for p in open_positions]
         if sym.upper() in open_symbols:
             print(f"[SCANNER] {sym} already has open position — skipping")
             return
-
+ 
         # v6.4: If top winner is in rotation guard, try next best group winner
         if is_recent(sym):
             print(f"[SCANNER] {sym} in rotation guard — trying next best group winner...")
@@ -590,11 +594,11 @@ def run_scanner():
             conf     = str(global_winner.get("confidence","MEDIUM")).upper()
             print(f"[SCANNER] Fallback winner: {sym} {action} [{sig_type}]")
             scan_results["global_winner"] = global_winner
-
+ 
         if pending_signal:
             print("[SCANNER] Signal already pending — skipping")
             return
-
+ 
         pending_signal = {
             "symbol":      sym,
             "action":      action,
@@ -608,7 +612,7 @@ def run_scanner():
         }
         _add_to_history(sym, action, score, sig_type)
         print(f"[SCANNER] ✅ Signal fired → {sym} {action} [{sig_type}] Score:{score}")
-
+ 
 # ─── Background Scanner Thread ─────────────────────────────────────────────────
 def scanner_loop():
     time.sleep(60)  # Initial delay — let server start
@@ -618,7 +622,7 @@ def scanner_loop():
         except Exception as e:
             print(f"[SCANNER ERROR] {e}")
         time.sleep(30 * 60)  # 30-minute cycle
-
+ 
 # ─── Self-Ping Thread — keeps Render free tier awake 24/7 ─────────────────────
 def self_ping_loop():
     """Pings own /ping endpoint every 10 minutes — prevents Render sleep"""
@@ -636,10 +640,10 @@ def self_ping_loop():
         except Exception as e:
             print(f"[PING] ⚠️  Self-ping failed: {e}")
         time.sleep(10 * 60)  # Every 10 minutes
-
+ 
 threading.Thread(target=scanner_loop,   daemon=True).start()
 threading.Thread(target=self_ping_loop, daemon=True).start()
-
+ 
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
