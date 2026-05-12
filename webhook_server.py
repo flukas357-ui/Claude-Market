@@ -1,9 +1,9 @@
 """
-Claude-Market Webhook Server v6.2
+Claude-Market Webhook Server v6.3
 Lukas Ferreira - Pretoria ZA
-v6.2: Scanner fires on ANY confidence level (LOW/MEDIUM/HIGH)
-      EA Smart Gates provide the real trade filter — no double blocking
-      Stage 2 prompt improved — cleaner JSON, no example symbol in template
+v6.3: No duplicate trades — checks MT5 open positions before firing
+      If symbol already has open position, scanner skips it
+      Rotation guard also improved
 Model: claude-sonnet-4-6
 """
 
@@ -65,7 +65,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "6.2",
+        "version": "6.3",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -549,13 +549,21 @@ def run_scanner():
         print(f"[SCANNER] ★ GLOBAL WINNER: {sym} {action} Score:{score} Type:{sig_type} Conf:{conf}")
         scan_results["global_winner"] = global_winner
 
-        # v6.2: Fire on any confidence — EA Smart Gates provide the real filter
+        # v6.3: Don't fire if score too low
         if score < 3:
             print(f"[SCANNER] Score too low ({score}) — no trade fired")
             return
 
+        # v6.3: Don't fire if position already open on this symbol
+        open_positions = mt5_status.get("positions", [])
+        open_symbols   = [str(p.get("symbol","")).upper() for p in open_positions]
+        if sym.upper() in open_symbols:
+            print(f"[SCANNER] {sym} already has open position — skipping duplicate")
+            return
+
+        # v6.3: Don't fire same symbol twice in rotation window
         if sym in recently_traded:
-            print(f"[SCANNER] {sym} recently traded — rotation guard active")
+            print(f"[SCANNER] {sym} in rotation guard — skipping")
             return
 
         if pending_signal:
@@ -610,6 +618,6 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v6.2 — port {port}")
+    print(f"Claude-Market Webhook Server v6.3 — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
