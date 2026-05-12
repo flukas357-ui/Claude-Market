@@ -1,16 +1,14 @@
 """
-Claude-Market Webhook Server v6.5
+Claude-Market Webhook Server v6.6
 Lukas Ferreira - Pretoria ZA
 ═══════════════════════════════════════════════════════
-MCAPI Engine 1 — Market Regime Engine
+MCAPI Engine 1 — Real Regime Data from EA
 ═══════════════════════════════════════════════════════
-v6.5: Added regime classification step before scanner
-      Claude assesses BULLISH/NEUTRAL/BEARISH per asset
-      Scanner now fires directional signals (not always BUY)
-      BULLISH → BUY signals only
-      BEARISH → SELL signals only
-      NEUTRAL → Claude picks best direction
-      Fixes the "always BUY fallback" bug permanently
+v6.6: Reads real regime from EA /status POST
+      EA calculates EMA50/200 + ADX14 on H1 per chart
+      Webhook stores EA-calculated regime per symbol
+      Claude regime classification now uses EA data
+      /regime endpoint shows REAL market regimes
 Model: claude-sonnet-4-6
 """
 
@@ -74,7 +72,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "6.5",
+        "version": "6.6",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -165,20 +163,29 @@ def get_signal():
 # ─── EA Status Receiver ────────────────────────────────────────────────────────
 @app.route("/status", methods=["POST"])
 def receive_status():
-    global mt5_status, trade_history
+    global mt5_status, trade_history, symbol_regimes
     try:
         data = request.get_json(force=True)
         mt5_status = data
         mt5_status["received_at"] = datetime.utcnow().isoformat()
+
+        # v6.6 Engine 1: Read REAL regime from EA (EMA50/200 + ADX14 calculated in MQL5)
+        ea_sym    = str(data.get("symbol","")).strip().upper()
+        ea_regime = str(data.get("regime","NEUTRAL")).upper().strip()
+        if ea_sym and ea_regime in ["BULLISH","BEARISH","NEUTRAL"]:
+            if symbol_regimes.get(ea_sym) != ea_regime:  # Only log on change
+                print(f"[REGIME] {ea_sym} = {ea_regime} (EA: EMA50/200+ADX14 H1)")
+            symbol_regimes[ea_sym] = ea_regime
+            scan_results["regimes"] = dict(symbol_regimes)
 
         # Extract closed trades if EA sends them
         for t in data.get("closed_trades", []):
             tickets = [x["ticket"] for x in trade_history]
             if t.get("ticket") not in tickets:
                 trade_history.insert(0, t)
-        trade_history = trade_history[:200]  # Keep last 200
+        trade_history = trade_history[:200]
 
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "trading_enabled": trading_enabled})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -744,6 +751,6 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v6.5 — MCAPI Engine 1 ACTIVE — port {port}")
+    print(f"Claude-Market Webhook Server v6.6 — Engine 1 REAL DATA — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
