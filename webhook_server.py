@@ -1,9 +1,11 @@
-"""  
-Claude-Market Webhook Server v6.3
+"""
+Claude-Market Webhook Server v6.4
 Lukas Ferreira - Pretoria ZA
-v6.3: No duplicate trades — checks MT5 open positions before firing
-      If symbol already has open position, scanner skips it
-      Rotation guard also improved
+v6.4: Fixed scanner stuck-on-EURUSD loop
+      - Stage 2: robust symbol matching (handles EUR/USD vs EURUSD)
+      - Stage 3: tries next best group winner if top pick is in rotation guard
+      - recently_traded: 6-hour expiry so symbols rotate back in
+      - Increased API call spacing to reduce rate limit failures
 Model: claude-sonnet-4-6
 """
 
@@ -47,7 +49,7 @@ scan_results     = {             # Scanner intelligence data
     "global_winner": None,
     "history": []
 }
-recently_traded  = []
+recently_traded  = {}  # {symbol: datetime} — 6-hour expiry rotation guard
 scan_lock        = threading.Lock()
 
 # ─── Asset Universe — Ava broker symbol names ─────────────────────────────────
@@ -65,7 +67,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "6.3",
+        "version": "6.4",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -362,7 +364,7 @@ def _scan_group(group_name, assets):
 def _pick_group_winner(group_name, top5, recently):
     """Stage 2: Pick the single best asset from a group's top candidates"""
     try:
-        avoid      = ", ".join(recently) if recently else "none"
+        avoid      = ", ".join(recently.keys()) if recently else "none"
         candidates = ", ".join(top5)
         utc_hour   = datetime.utcnow().hour
         session    = "London/Frankfurt" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian/Off-hours"
@@ -392,24 +394,24 @@ def _pick_group_winner(group_name, top5, recently):
         start = text.find("{")
         end   = text.rfind("}") + 1
         if start >= 0 and end > start:
-            r = json.loads(text[start:end])
-            sym    = str(r.get("symbol","")).strip()
+            r      = json.loads(text[start:end])
+            raw_sym = str(r.get("symbol","")).strip()
+            # v6.4: robust symbol matching — normalise both sides
+            def norm(s): return s.upper().replace("/","").replace(" ","").replace("-","")
+            norm_map = {norm(s): s for s in top5}
+            sym = norm_map.get(norm(raw_sym), top5[0])
+            if norm(raw_sym) not in norm_map:
+                print(f"[SCAN2] '{raw_sym}' not matched — using {top5[0]}")
             action = str(r.get("action","BUY")).upper().strip()
             conf   = str(r.get("confidence","MEDIUM")).upper().strip()
             stype  = str(r.get("signal_type","RANGE")).upper().strip()
             reason = str(r.get("reason","Scanner pick"))
-            # Validate
-            if sym not in top5:
-                sym = top5[0]  # Fallback to first candidate
-            if action not in ["BUY","SELL"]:
-                action = "BUY"
-            if conf not in ["LOW","MEDIUM","HIGH"]:
-                conf = "MEDIUM"
-            if stype not in ["RANGE","BB_BREAKOUT"]:
-                stype = "RANGE"
+            if action not in ["BUY","SELL"]:           action = "BUY"
+            if conf   not in ["LOW","MEDIUM","HIGH"]:  conf   = "MEDIUM"
+            if stype  not in ["RANGE","BB_BREAKOUT"]:  stype  = "RANGE"
             result = {"symbol":sym,"action":action,"confidence":conf,
                       "signal_type":stype,"reason":reason,"support":0,"resistance":0}
-            print(f"[SCAN2] {group_name} winner: {sym} {action} [{stype}] ({conf})")
+            print(f"[SCAN2] {group_name} → {sym} {action} [{stype}] ({conf})")
             return result
         print(f"[SCAN2] {group_name} — JSON parse failed, using fallback")
     except Exception as e:
@@ -424,7 +426,7 @@ def _pick_global_winner(group_winners, recently):
     """Stage 3: Pick the best opportunity across all group winners"""
     try:
         candidates_json = json.dumps(group_winners, indent=2)
-        avoid    = ", ".join(recently) if recently else "none"
+        avoid    = ", ".join(recently.keys()) if recently else "none"
         utc_hour = datetime.utcnow().hour
         session  = "London/Frankfurt" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian/Off-hours"
         resp = client.messages.create(
@@ -486,11 +488,14 @@ def _add_to_history(symbol, action, score, sig_type):
     scan_results["history"].insert(0, entry)
     scan_results["history"] = scan_results["history"][:20]
 
-    # Keep rotation list for 24h
-    if symbol not in recently_traded:
-        recently_traded.append(symbol)
-    # Clear entries older than 24h (simple: keep last 12)
-    recently_traded = recently_traded[-12:]
+    # v6.4: recently_traded with 6-hour expiry
+    recently_traded[symbol] = datetime.utcnow()
+    # Remove symbols older than 6 hours
+    cutoff = datetime.utcnow() - timedelta(hours=6)
+    expired = [s for s, t in recently_traded.items() if t < cutoff]
+    for s in expired:
+        del recently_traded[s]
+        print(f"[ROTATION] {s} expired from rotation guard")
 
 def run_scanner():
     """Full 3-stage scan — runs every 30 minutes"""
@@ -554,17 +559,37 @@ def run_scanner():
             print(f"[SCANNER] Score too low ({score}) — no trade fired")
             return
 
-        # v6.3: Don't fire if position already open on this symbol
+        # v6.4: Check rotation guard with expiry-aware dict
+        def is_recent(s): return s in recently_traded
+
+        # v6.4: Don't fire if position already open on this symbol
         open_positions = mt5_status.get("positions", [])
         open_symbols   = [str(p.get("symbol","")).upper() for p in open_positions]
         if sym.upper() in open_symbols:
-            print(f"[SCANNER] {sym} already has open position — skipping duplicate")
+            print(f"[SCANNER] {sym} already has open position — skipping")
             return
 
-        # v6.3: Don't fire same symbol twice in rotation window
-        if sym in recently_traded:
-            print(f"[SCANNER] {sym} in rotation guard — skipping")
-            return
+        # v6.4: If top winner is in rotation guard, try next best group winner
+        if is_recent(sym):
+            print(f"[SCANNER] {sym} in rotation guard — trying next best group winner...")
+            all_winners = list(stage2.values())
+            fallback_winner = None
+            for w in all_winners:
+                candidate = w.get("symbol","")
+                if not is_recent(candidate) and candidate.upper() not in open_symbols:
+                    fallback_winner = w
+                    break
+            if not fallback_winner:
+                print(f"[SCANNER] All group winners in rotation guard — no signal fired")
+                return
+            global_winner = fallback_winner
+            sym      = global_winner.get("symbol","")
+            action   = str(global_winner.get("action","BUY")).upper()
+            score    = max(1, min(5, int(global_winner.get("score",3) or 3)))
+            sig_type = str(global_winner.get("signal_type","RANGE")).upper()
+            conf     = str(global_winner.get("confidence","MEDIUM")).upper()
+            print(f"[SCANNER] Fallback winner: {sym} {action} [{sig_type}]")
+            scan_results["global_winner"] = global_winner
 
         if pending_signal:
             print("[SCANNER] Signal already pending — skipping")
@@ -618,6 +643,6 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v6.3 — port {port}")
+    print(f"Claude-Market Webhook Server v6.4 — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
