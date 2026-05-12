@@ -1,11 +1,10 @@
-""" 
-Claude-Market Webhook Server v6.0
+"""
+Claude-Market Webhook Server v6.1
 Lukas Ferreira - Pretoria ZA
-Features: 3-Stage Global Scanner, Kill Switch, Live MT5 Status, Range Detection
-v6.0: AUTONOMOUS — self-ping keeps Render awake 24/7, scanner never stops
-      Fixed Ava broker symbol names (US_TECH100, US_500, US_30, GERMANY_40)
-      Scanner fires both RANGE and BB_BREAKOUT signals
-      Added /ping endpoint + /signal/close for future auto-close
+v6.1: Fixed Stage 1 + Stage 2 JSON parsing failures
+      Simplified Claude response format — no support/resistance required
+      Stage 2 always returns a winner (fallback if Claude fails)
+      Better error logging so failures are visible in Render logs
 Model: claude-sonnet-4-6
 """
 
@@ -67,7 +66,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "6.0",
+        "version": "6.1",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -328,107 +327,154 @@ def _scan_group(group_name, assets):
     """Stage 1: Ask Claude to rank top 5 ranging assets in a group"""
     try:
         asset_list = ", ".join(assets)
+        utc_hour   = datetime.utcnow().hour
+        session    = "London/Frankfurt" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian/Off-hours"
         resp = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=200,
+            max_tokens=100,
             messages=[{
                 "role": "user",
                 "content": (
-                    f"Claude-Market Range Scanner — Stage 1.\n"
-                    f"Group: {group_name}\n"
-                    f"Assets: {asset_list}\n"
-                    f"Current UTC time: {datetime.utcnow().strftime('%H:%M %A')}\n\n"
-                    f"Analyse these assets for RANGING (sideways) market conditions.\n"
-                    f"Consider: Bollinger Band squeeze, low ATR, consolidation, support/resistance.\n\n"
-                    f"Reply ONLY with a JSON array of the top 5 symbols most likely ranging right now.\n"
-                    f"Format: [\"SYM1\",\"SYM2\",\"SYM3\",\"SYM4\",\"SYM5\"]\n"
-                    f"Use exact symbol names from the list. JSON only, no explanation."
+                    f"Claude-Market Scanner Stage 1. Session: {session}.\n"
+                    f"Group: {group_name}. Assets: {asset_list}\n\n"
+                    f"Pick the top 3 assets most suitable for trading right now.\n"
+                    f"Reply ONLY with a JSON array using EXACT symbol names from the list.\n"
+                    f"Example: [\"EURUSD\",\"GBPUSD\",\"USDJPY\"]\n"
+                    f"JSON array only. No explanation."
                 )
             }]
         )
         text = resp.content[0].text.strip()
+        print(f"[SCAN1] {group_name} raw: {text[:80]}")
         start = text.find("[")
         end   = text.rfind("]") + 1
         if start >= 0 and end > start:
             result = json.loads(text[start:end])
-            return [s for s in result if s in assets][:5]
+            # Only keep symbols that actually exist in our asset list
+            valid = [s for s in result if s in assets]
+            if valid:
+                print(f"[SCAN1] {group_name} → {valid}")
+                return valid[:3]
+        print(f"[SCAN1] {group_name} — JSON parse failed, using fallback")
     except Exception as e:
-        print(f"[SCAN ERROR] Stage1 {group_name}: {e}")
+        print(f"[SCAN1 ERROR] {group_name}: {e}")
     return assets[:3]  # Fallback
 
 def _pick_group_winner(group_name, top5, recently):
-    """Stage 2: Pick the single best ranging asset from a group's top 5"""
+    """Stage 2: Pick the single best asset from a group's top candidates"""
     try:
-        avoid = ", ".join(recently) if recently else "none"
+        avoid      = ", ".join(recently) if recently else "none"
         candidates = ", ".join(top5)
+        utc_hour   = datetime.utcnow().hour
+        session    = "London/Frankfurt" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian/Off-hours"
         resp = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=200,
+            max_tokens=150,
             messages=[{
                 "role": "user",
                 "content": (
-                    f"Claude-Market Range Scanner — Stage 2.\n"
-                    f"Group: {group_name}\n"
-                    f"Candidates: {candidates}\n"
-                    f"Recently traded (avoid): {avoid}\n\n"
-                    f"Pick the SINGLE BEST ranging opportunity from the candidates.\n"
-                    f"Do NOT pick from the recently traded list.\n\n"
-                    f"Reply ONLY with this exact JSON format:\n"
-                    f"{{\"symbol\":\"SYMBOL\",\"action\":\"BUY\",\"support\":0.0,\"resistance\":0.0,"
-                    f"\"confidence\":\"HIGH\",\"reason\":\"brief reason\"}}\n"
-                    f"action must be BUY (near support) or SELL (near resistance).\n"
-                    f"JSON only, no explanation."
+                    f"Claude-Market Scanner Stage 2. Session: {session}.\n"
+                    f"Group: {group_name}. Candidates: {candidates}\n"
+                    f"Avoid recently traded: {avoid}\n\n"
+                    f"Pick the SINGLE BEST trading opportunity from the candidates.\n"
+                    f"Reply ONLY with this exact JSON:\n"
+                    f"{{\"symbol\":\"{top5[0]}\",\"action\":\"BUY\",\"confidence\":\"HIGH\","
+                    f"\"signal_type\":\"RANGE\",\"reason\":\"one line reason\"}}\n"
+                    f"action: BUY or SELL. confidence: LOW/MEDIUM/HIGH.\n"
+                    f"signal_type: RANGE or BB_BREAKOUT.\n"
+                    f"Use exact symbol from candidates. JSON only."
                 )
             }]
         )
         text = resp.content[0].text.strip()
+        print(f"[SCAN2] {group_name} raw: {text[:100]}")
         start = text.find("{")
         end   = text.rfind("}") + 1
         if start >= 0 and end > start:
-            result = json.loads(text[start:end])
-            if result.get("symbol") and result.get("action"):
-                return result
+            r = json.loads(text[start:end])
+            sym    = str(r.get("symbol","")).strip()
+            action = str(r.get("action","BUY")).upper().strip()
+            conf   = str(r.get("confidence","MEDIUM")).upper().strip()
+            stype  = str(r.get("signal_type","RANGE")).upper().strip()
+            reason = str(r.get("reason","Scanner pick"))
+            # Validate
+            if sym not in top5:
+                sym = top5[0]  # Fallback to first candidate
+            if action not in ["BUY","SELL"]:
+                action = "BUY"
+            if conf not in ["LOW","MEDIUM","HIGH"]:
+                conf = "MEDIUM"
+            if stype not in ["RANGE","BB_BREAKOUT"]:
+                stype = "RANGE"
+            result = {"symbol":sym,"action":action,"confidence":conf,
+                      "signal_type":stype,"reason":reason,"support":0,"resistance":0}
+            print(f"[SCAN2] {group_name} winner: {sym} {action} [{stype}] ({conf})")
+            return result
+        print(f"[SCAN2] {group_name} — JSON parse failed, using fallback")
     except Exception as e:
-        print(f"[SCAN ERROR] Stage2 {group_name}: {e}")
-    return None
+        print(f"[SCAN2 ERROR] {group_name}: {e}")
+    # Always return a fallback winner — never leave Stage 2 empty
+    fallback = {"symbol":top5[0],"action":"BUY","confidence":"LOW",
+                "signal_type":"RANGE","reason":"Fallback pick","support":0,"resistance":0}
+    print(f"[SCAN2] {group_name} fallback → {top5[0]}")
+    return fallback
 
 def _pick_global_winner(group_winners, recently):
     """Stage 3: Pick the best opportunity across all group winners"""
     try:
         candidates_json = json.dumps(group_winners, indent=2)
-        avoid = ", ".join(recently) if recently else "none"
+        avoid    = ", ".join(recently) if recently else "none"
         utc_hour = datetime.utcnow().hour
-        session = "London/Frankfurt" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian/Off-hours"
+        session  = "London/Frankfurt" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian/Off-hours"
         resp = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=300,
+            max_tokens=200,
             messages=[{
                 "role": "user",
                 "content": (
-                    f"Claude-Market Scanner — Stage 3: Global Final.\n"
-                    f"Current session: {session} ({utc_hour}:00 UTC)\n"
-                    f"Group winners to compare:\n{candidates_json}\n"
-                    f"Recently traded (avoid): {avoid}\n\n"
-                    f"Select the SINGLE BEST global trading opportunity.\n"
-                    f"Consider: session suitability, confidence, typical range width, volatility.\n"
-                    f"Set signal_type to RANGE if market is ranging/sideways, BB_BREAKOUT if trending/breaking.\n\n"
+                    f"Claude-Market Scanner Stage 3 — Global Final.\n"
+                    f"Session: {session} ({utc_hour}:00 UTC)\n"
+                    f"Group winners:\n{candidates_json}\n"
+                    f"Avoid: {avoid}\n\n"
+                    f"Pick the SINGLE BEST global opportunity.\n"
                     f"Reply ONLY with this JSON:\n"
-                    f"{{\"symbol\":\"SYM\",\"action\":\"BUY\",\"score\":4,"
-                    f"\"signal_type\":\"RANGE\",\"group\":\"GroupName\","
-                    f"\"support\":0.0,\"resistance\":0.0,"
-                    f"\"confidence\":\"HIGH\",\"reason\":\"explanation\","
-                    f"\"broker_available\":true}}\n"
-                    f"action: BUY or SELL. score: 1-5. JSON only."
+                    f"{{\"symbol\":\"GOLD\",\"action\":\"BUY\",\"score\":4,"
+                    f"\"signal_type\":\"RANGE\",\"confidence\":\"HIGH\","
+                    f"\"group\":\"Commodities\",\"reason\":\"one line reason\"}}\n"
+                    f"score: 1-5. signal_type: RANGE or BB_BREAKOUT. JSON only."
                 )
             }]
         )
         text = resp.content[0].text.strip()
+        print(f"[SCAN3] Global raw: {text[:120]}")
         start = text.find("{")
         end   = text.rfind("}") + 1
         if start >= 0 and end > start:
-            return json.loads(text[start:end])
+            r = json.loads(text[start:end])
+            sym    = str(r.get("symbol","")).strip()
+            action = str(r.get("action","BUY")).upper()
+            score  = max(1, min(5, int(r.get("score", 3) or 3)))
+            stype  = str(r.get("signal_type","RANGE")).upper()
+            conf   = str(r.get("confidence","MEDIUM")).upper()
+            reason = str(r.get("reason","Global scanner pick"))
+            group  = str(r.get("group",""))
+            if action not in ["BUY","SELL"]: action = "BUY"
+            if stype not in ["RANGE","BB_BREAKOUT"]: stype = "RANGE"
+            if conf not in ["LOW","MEDIUM","HIGH"]: conf = "MEDIUM"
+            result = {"symbol":sym,"action":action,"score":score,"signal_type":stype,
+                      "confidence":conf,"group":group,"reason":reason,
+                      "support":0,"resistance":0,"broker_available":True}
+            print(f"[SCAN3] Global winner: {sym} {action} Score:{score} [{stype}] ({conf})")
+            return result
+        print(f"[SCAN3] JSON parse failed")
     except Exception as e:
-        print(f"[SCAN ERROR] Stage3 global: {e}")
+        print(f"[SCAN3 ERROR]: {e}")
+    # Fallback — pick first group winner
+    if group_winners:
+        w = group_winners[0]
+        w["score"] = 3
+        print(f"[SCAN3] Fallback → {w.get('symbol')}")
+        return w
     return None
 
 def _add_to_history(symbol, action, score, sig_type):
@@ -562,6 +608,6 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v6.0 — port {port}")
+    print(f"Claude-Market Webhook Server v6.1 — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
