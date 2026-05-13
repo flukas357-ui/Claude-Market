@@ -499,8 +499,8 @@ def _regime_action(regime):
     return None  # NEUTRAL = Claude decides
 
 
-
-    """Stage 1: Ask Claude to rank top 5 ranging assets in a group"""
+def _scan_group(group_name, assets):
+    """Stage 1: Ask Claude to rank top 3 trading assets in a group"""
     try:
         asset_list = ", ".join(assets)
         utc_hour   = datetime.utcnow().hour
