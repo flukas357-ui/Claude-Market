@@ -1,10 +1,13 @@
-""" 
-Claude-Market Webhook Server v6.8
+"""
+Claude-Market Webhook Server v6.9
 Lukas Ferreira - Pretoria ZA
-v6.7: Fixed rotation guard deadlock — cleanup runs every scan
-      Added /rotation/clear endpoint for manual reset
-      Merged Engine 1 into Stage 1 — halves API calls
-      Prevents "all symbols blocked forever" situation
+MCAPI Engine 2 (mini) — Session Intelligence
+v6.9: Market hours filter in scanner Stage 1
+      Closed assets excluded before scanning starts
+      No more NAS100 signals when US market is closed
+      Crypto 24/7 | US indices 14:30-21:00 UTC | EU 07:00-15:30
+      Forex/metals Mon-Fri 00:00-22:00 UTC
+      /session endpoint shows live open/closed per symbol
 Model: claude-sonnet-4-6
 """
 
@@ -68,7 +71,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "6.8",
+        "version": "6.9",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -285,6 +288,21 @@ def get_regimes():
         "neutral": [s for s,r in symbol_regimes.items() if r=="NEUTRAL"]
     })
 
+@app.route("/session", methods=["GET"])
+def get_session():
+    """Engine 2: Live market open/closed status per symbol"""
+    status = get_session_status()
+    open_syms   = [s for s,v in status.items() if v=="OPEN"]
+    closed_syms = [s for s,v in status.items() if v=="CLOSED"]
+    return jsonify({
+        "timestamp": datetime.utcnow().isoformat(),
+        "utc_hour":  datetime.utcnow().hour,
+        "open":      open_syms,
+        "closed":    closed_syms,
+        "count_open": len(open_syms),
+        "symbols":   status
+    })
+
 @app.route("/rotation", methods=["GET"])
 def get_rotation():
     """Show current rotation guard — which symbols are blocked and when they expire"""
@@ -374,7 +392,60 @@ def _claude_validate(symbol, action, price, sig_type):
 # Classifies each asset as BULLISH / NEUTRAL / BEARISH before scanning
 # This determines signal direction — fixes the "always BUY" problem
 # ═══════════════════════════════════════════════════════════════════════════════
-def _classify_regimes(group_name, assets):
+# ═══════════════════════════════════════════════════════════════════════════════
+# MCAPI ENGINE 2 (mini) — SESSION INTELLIGENCE
+# Filters closed markets from the scanner BEFORE Stage 1 even starts
+# No more wasting signals on assets the broker won't accept
+# ═══════════════════════════════════════════════════════════════════════════════
+def is_asset_open(sym):
+    """Return True if this asset is currently tradeable by market hours (UTC)"""
+    now     = datetime.utcnow()
+    weekday = now.weekday()          # 0=Mon … 6=Sun
+    h       = now.hour + now.minute / 60.0   # decimal UTC hour
+
+    # ── Crypto: always open 24/7 ──────────────────────────────────────────────
+    if sym in ["BTCUSD","ETHUSD"]:
+        return True
+
+    # ── Weekend: only crypto is open ─────────────────────────────────────────
+    if weekday == 6:                 # Sunday — forex opens 22:00 UTC
+        return h >= 22.0
+    if weekday == 5:                 # Saturday — all closed
+        return False
+
+    # ── Friday close — most markets close 22:00 UTC Friday ────────────────────
+    if weekday == 4 and h >= 22.0:
+        return False
+
+    # ── US Indices: 14:30–21:00 UTC (16:30–23:00 SAST) ───────────────────────
+    if sym in ["US_TECH100","NAS100","US_500","US_30"]:
+        return 14.5 <= h <= 21.0
+
+    # ── European Indices: 07:00–15:30 UTC ────────────────────────────────────
+    if sym in ["GERMANY_40","UK_100","FRANCE_40"]:
+        return 7.0 <= h <= 15.5
+
+    # ── Asian Indices: 00:00–06:00 UTC ───────────────────────────────────────
+    if sym in ["JAPAN_225"]:
+        return h <= 6.0 or h >= 23.5
+
+    # ── Forex, Metals, Oil, ZAR pairs: Mon–Fri broadly open ──────────────────
+    # GOLD, SILVER, EURUSD, GBPUSD, USDZAR etc.
+    return True
+
+
+def get_session_status():
+    """Return open/closed status for all assets — used by /session endpoint"""
+    all_syms = []
+    for assets in ASSET_GROUPS.values():
+        all_syms.extend(assets)
+    return {
+        sym: "OPEN" if is_asset_open(sym) else "CLOSED"
+        for sym in all_syms
+    }
+
+
+
     """Engine 1: Classify market regime for each asset in a group"""
     try:
         utc_hour = datetime.utcnow().hour
@@ -623,17 +694,23 @@ def run_scanner():
         else:
             print(f"[ROTATION] Active guard: {list(recently_traded.keys())}")
 
-        # ── ENGINE 1 + STAGE 1 MERGED ─────────────────────────────────────────
-        # v6.7: Use EA real regime data + scan in ONE step (saves 6 API calls)
-        print("[SCANNER] Stage 1 — scanning groups (Engine 1 regime from EA data)...")
+        # ── ENGINE 2 (mini) + STAGE 1: Scan OPEN assets only ─────────────────
+        print("[SCANNER] Engine 2 — filtering by market hours...")
         stage1 = {}
-        # Use real regime data from EA where available, NEUTRAL otherwise
         scan_results["regimes"] = dict(symbol_regimes)
 
         for group, assets in ASSET_GROUPS.items():
-            top5 = _scan_group(group, assets)
+            # Filter to only currently open assets
+            open_assets = [a for a in assets if is_asset_open(a)]
+            closed_assets = [a for a in assets if not is_asset_open(a)]
+            if closed_assets:
+                print(f"  [SESSION] {group} — closed: {closed_assets}")
+            if not open_assets:
+                print(f"  [SESSION] {group} — all assets closed, skipping group")
+                continue
+            top5 = _scan_group(group, open_assets)
             stage1[group] = top5
-            print(f"  {group}: {top5}")
+            print(f"  {group} ({len(open_assets)} open): {top5}")
             time.sleep(1)
         scan_results["stage1"] = stage1
 
@@ -767,6 +844,6 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v6.8 — Engine 1 REAL DATA — port {port}")
+    print(f"Claude-Market Webhook Server v6.9 — Engine 1 + Engine 2 SESSION FILTER — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
