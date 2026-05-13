@@ -1,5 +1,5 @@
 """
-Claude-Market Webhook Server v6.7
+Claude-Market Webhook Server v6.8
 Lukas Ferreira - Pretoria ZA
 v6.7: Fixed rotation guard deadlock — cleanup runs every scan
       Added /rotation/clear endpoint for manual reset
@@ -68,7 +68,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "6.7",
+        "version": "6.8",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -684,38 +684,37 @@ def run_scanner():
             print(f"[SCANNER] Score too low ({score}) — no trade fired")
             return
 
-        # v6.4: Check rotation guard with expiry-aware dict
+        # v6.8 FIX: Combined block check — open position OR rotation guard
+        # Both now try next best group winner instead of giving up
         def is_recent(s): return s in recently_traded
-
-        # v6.4: Don't fire if position already open on this symbol
         open_positions = mt5_status.get("positions", [])
         open_symbols   = [str(p.get("symbol","")).upper() for p in open_positions]
-        if sym.upper() in open_symbols:
-            print(f"[SCANNER] {sym} already has open position — skipping")
-            return
 
-        # v6.4: If top winner is in rotation guard, try next best group winner
-        if is_recent(sym):
-            print(f"[SCANNER] {sym} in rotation guard — trying next best group winner...")
+        def is_blocked(s):
+            return s.upper() in open_symbols or is_recent(s)
+
+        if is_blocked(sym):
+            reason = "already open" if sym.upper() in open_symbols else "rotation guard"
+            print(f"[SCANNER] {sym} blocked ({reason}) — trying next best group winner...")
             all_winners = list(stage2.values())
             fallback_winner = None
             for w in all_winners:
-                candidate = w.get("symbol","")
-                if not is_recent(candidate) and candidate.upper() not in open_symbols:
+                candidate = str(w.get("symbol",""))
+                if not is_blocked(candidate):
                     fallback_winner = w
                     break
             if not fallback_winner:
-                print(f"[SCANNER] All group winners in rotation guard — no signal fired")
+                print(f"[SCANNER] All group winners blocked — no signal fired")
                 return
             global_winner = fallback_winner
-            sym      = global_winner.get("symbol","")
+            sym      = str(global_winner.get("symbol",""))
             action   = str(global_winner.get("action","BUY")).upper()
             score    = max(1, min(5, int(global_winner.get("score",3) or 3)))
             sig_type = str(global_winner.get("signal_type","RANGE")).upper()
+            if sig_type not in ["RANGE","BB_BREAKOUT"]: sig_type = "RANGE"
             conf     = str(global_winner.get("confidence","MEDIUM")).upper()
-            print(f"[SCANNER] Fallback winner: {sym} {action} [{sig_type}]")
             scan_results["global_winner"] = global_winner
-
+            print(f"[SCANNER] Fallback winner: {sym} {action} [{sig_type}]")
         if pending_signal:
             print("[SCANNER] Signal already pending — skipping")
             return
@@ -768,6 +767,6 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v6.7 — Engine 1 REAL DATA — port {port}")
+    print(f"Claude-Market Webhook Server v6.8 — Engine 1 REAL DATA — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
