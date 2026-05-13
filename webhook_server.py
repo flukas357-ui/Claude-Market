@@ -1,4 +1,4 @@
-"""
+""" 
 Claude-Market Webhook Server v6.8
 Lukas Ferreira - Pretoria ZA
 v6.7: Fixed rotation guard deadlock — cleanup runs every scan
