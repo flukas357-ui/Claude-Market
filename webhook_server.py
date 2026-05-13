@@ -240,6 +240,8 @@ def delete_history():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/trading/stop", methods=["GET","POST"])
+@app.route("/trading/pause", methods=["GET","POST"])
 def stop_trading():
     global trading_enabled, pending_signal
     trading_enabled = False
