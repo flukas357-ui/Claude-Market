@@ -1,14 +1,10 @@
 """
-Claude-Market Webhook Server v6.6
+Claude-Market Webhook Server v6.7
 Lukas Ferreira - Pretoria ZA
-═══════════════════════════════════════════════════════
-MCAPI Engine 1 — Real Regime Data from EA
-═══════════════════════════════════════════════════════
-v6.6: Reads real regime from EA /status POST
-      EA calculates EMA50/200 + ADX14 on H1 per chart
-      Webhook stores EA-calculated regime per symbol
-      Claude regime classification now uses EA data
-      /regime endpoint shows REAL market regimes
+v6.7: Fixed rotation guard deadlock — cleanup runs every scan
+      Added /rotation/clear endpoint for manual reset
+      Merged Engine 1 into Stage 1 — halves API calls
+      Prevents "all symbols blocked forever" situation
 Model: claude-sonnet-4-6
 """
 
@@ -72,7 +68,7 @@ ASSET_GROUPS = {
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "6.6",
+        "version": "6.7",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -288,6 +284,28 @@ def get_regimes():
         "bearish": [s for s,r in symbol_regimes.items() if r=="BEARISH"],
         "neutral": [s for s,r in symbol_regimes.items() if r=="NEUTRAL"]
     })
+
+@app.route("/rotation", methods=["GET"])
+def get_rotation():
+    """Show current rotation guard — which symbols are blocked and when they expire"""
+    now = datetime.utcnow()
+    status = {}
+    for sym, t in recently_traded.items():
+        age_hours = (now - t).total_seconds() / 3600
+        status[sym] = {"expires_in_hours": round(max(0, 6 - age_hours), 1)}
+    return jsonify({"blocked": list(recently_traded.keys()),
+                    "count": len(recently_traded), "detail": status})
+
+@app.route("/rotation/clear", methods=["GET","POST"])
+def clear_rotation():
+    """Manually clear rotation guard — use when all symbols are stuck"""
+    global recently_traded
+    cleared = list(recently_traded.keys())
+    recently_traded = {}
+    print(f"[ROTATION] Manual clear — removed: {cleared}")
+    return jsonify({"ok": True, "cleared": cleared,
+                    "message": "All symbols available again ✅"})
+
 def ping():
     """Self-ping endpoint — keeps Render awake 24/7"""
     return jsonify({
@@ -585,7 +603,7 @@ def run_scanner():
     """Full 3-stage scan with Engine 1 regime classification — runs every 30 minutes"""
     global pending_signal, symbol_regimes
     with scan_lock:
-        print(f"\n[SCANNER] ═══ Starting scan + Engine 1 Regime — {datetime.utcnow().strftime('%H:%M UTC')} ═══")
+        print(f"\n[SCANNER] ═══ Starting scan — {datetime.utcnow().strftime('%H:%M UTC')} ═══")
         scan_results["last_run"] = datetime.utcnow().isoformat()
         scan_results["next_run"] = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
 
@@ -593,31 +611,30 @@ def run_scanner():
             print("[SCANNER] Skipped — kill switch active")
             return
 
-        # ── ENGINE 1: Classify regime for all assets before scanning ──────────
-        print("[SCANNER] Engine 1 — Classifying market regimes per asset...")
-        all_regimes = {}
-        for group_name, assets in ASSET_GROUPS.items():
-            group_regimes = _classify_regimes(group_name, assets)
-            all_regimes.update(group_regimes)
-            time.sleep(1)
-        symbol_regimes = all_regimes
-        scan_results["regimes"] = all_regimes
-        bullish = [s for s,r in all_regimes.items() if r=="BULLISH"]
-        bearish = [s for s,r in all_regimes.items() if r=="BEARISH"]
-        print(f"[REGIME] BULLISH: {bullish}")
-        print(f"[REGIME] BEARISH: {bearish}")
-        print(f"[REGIME] NEUTRAL: {[s for s,r in all_regimes.items() if r=='NEUTRAL']}")
-        # ──────────────────────────────────────────────────────────────────────
+        # v6.7 FIX: Clean rotation guard at START of every scan (not just on signal fire)
+        # Prevents deadlock where all symbols are blocked and no signal ever fires to clear them
+        cutoff = datetime.utcnow() - timedelta(hours=6)
+        expired = [s for s, t in recently_traded.items() if t < cutoff]
+        for s in expired:
+            del recently_traded[s]
+            print(f"[ROTATION] {s} expired — available again")
+        if expired:
+            print(f"[ROTATION] Cleared {len(expired)} expired symbols. Active: {list(recently_traded.keys())}")
+        else:
+            print(f"[ROTATION] Active guard: {list(recently_traded.keys())}")
 
-        # ── STAGE 1: Scan all 6 groups ────────────────────────────────────────
-        print("[SCANNER] Stage 1: Scanning 6 groups × assets...")
+        # ── ENGINE 1 + STAGE 1 MERGED ─────────────────────────────────────────
+        # v6.7: Use EA real regime data + scan in ONE step (saves 6 API calls)
+        print("[SCANNER] Stage 1 — scanning groups (Engine 1 regime from EA data)...")
         stage1 = {}
+        # Use real regime data from EA where available, NEUTRAL otherwise
+        scan_results["regimes"] = dict(symbol_regimes)
 
         for group, assets in ASSET_GROUPS.items():
             top5 = _scan_group(group, assets)
             stage1[group] = top5
             print(f"  {group}: {top5}")
-            time.sleep(1)  # Rate limit spacing
+            time.sleep(1)
         scan_results["stage1"] = stage1
 
         # ── STAGE 2: Pick winner per group (regime-aware) ────────────────────
@@ -628,8 +645,8 @@ def run_scanner():
             winner = _pick_group_winner(group, top5, recently_traded)
             if winner:
                 sym_w = winner.get("symbol","")
-                # Engine 1: enforce regime direction
-                regime = all_regimes.get(sym_w, "NEUTRAL")
+                # Engine 1: enforce regime direction from EA real data
+                regime = symbol_regimes.get(sym_w, "NEUTRAL")
                 forced_action = _regime_action(regime)
                 if forced_action:
                     winner["action"] = forced_action
@@ -751,6 +768,6 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Claude-Market Webhook Server v6.6 — Engine 1 REAL DATA — port {port}")
+    print(f"Claude-Market Webhook Server v6.7 — Engine 1 REAL DATA — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
