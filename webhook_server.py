@@ -673,10 +673,16 @@ def _add_to_history(symbol, action, score, sig_type):
         print(f"[ROTATION] {s} expired from rotation guard")
 
 def run_scanner():
-    """Full 3-stage scan with Engine 1 regime classification — runs every 30 minutes"""
-    global pending_signal, symbol_regimes
+    """
+    Simplified scanner v6.9 — uses same logic as Test Signal (known to work)
+    1. Filter available symbols (market open, not blocked, not already open)
+    2. Claude picks the best symbol and direction  
+    3. Claude validates score (SAME as /webhook Test Signal)
+    4. Fire signal in identical format to Test Signal
+    """
+    global pending_signal
     with scan_lock:
-        print(f"\n[SCANNER] ═══ Starting scan — {datetime.utcnow().strftime('%H:%M UTC')} ═══")
+        print(f"\n[SCANNER] ═══ Starting — {datetime.utcnow().strftime('%H:%M UTC')} ═══")
         scan_results["last_run"] = datetime.utcnow().isoformat()
         scan_results["next_run"] = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
 
@@ -684,133 +690,127 @@ def run_scanner():
             print("[SCANNER] Skipped — kill switch active")
             return
 
-        # v6.7 FIX: Clean rotation guard at START of every scan (not just on signal fire)
-        # Prevents deadlock where all symbols are blocked and no signal ever fires to clear them
+        # ── Step 1: Clean rotation guard ─────────────────────────────────────
         cutoff = datetime.utcnow() - timedelta(hours=6)
-        expired = [s for s, t in recently_traded.items() if t < cutoff]
-        for s in expired:
+        for s in [k for k, v in list(recently_traded.items()) if v < cutoff]:
             del recently_traded[s]
             print(f"[ROTATION] {s} expired — available again")
-        if expired:
-            print(f"[ROTATION] Cleared {len(expired)} expired symbols. Active: {list(recently_traded.keys())}")
-        else:
-            print(f"[ROTATION] Active guard: {list(recently_traded.keys())}")
+        print(f"[ROTATION] Blocked: {list(recently_traded.keys())}")
 
-        # ── ENGINE 2 (mini) + STAGE 1: Scan OPEN assets only ─────────────────
-        print("[SCANNER] Engine 2 — filtering by market hours...")
-        stage1 = {}
-        scan_results["regimes"] = dict(symbol_regimes)
+        # ── Step 2: Build available symbol list ───────────────────────────────
+        open_syms = {str(p.get("symbol","")).upper()
+                     for p in mt5_status.get("positions",[])}
 
-        for group, assets in ASSET_GROUPS.items():
-            # Filter to only currently open assets
-            open_assets = [a for a in assets if is_asset_open(a)]
-            closed_assets = [a for a in assets if not is_asset_open(a)]
-            if closed_assets:
-                print(f"  [SESSION] {group} — closed: {closed_assets}")
-            if not open_assets:
-                print(f"  [SESSION] {group} — all assets closed, skipping group")
-                continue
-            top5 = _scan_group(group, open_assets)
-            stage1[group] = top5
-            print(f"  {group} ({len(open_assets)} open): {top5}")
-            time.sleep(1)
-        scan_results["stage1"] = stage1
+        # Priority symbols — best liquidity and Ava-supported
+        all_syms = ["GOLD","SILVER","BTCUSD","ETHUSD","EURUSD",
+                    "GBPUSD","USDJPY","USDZAR","GBPJPY","AUDUSD"]
 
-        # ── STAGE 2: Pick winner per group (regime-aware) ────────────────────
-        print("[SCANNER] Stage 2: Picking group winners (Engine 1 regime applied)...")
-        stage2 = {}
-        for group, top5 in stage1.items():
-            if not top5: continue
-            winner = _pick_group_winner(group, top5, recently_traded)
-            if winner:
-                sym_w = winner.get("symbol","")
-                # Engine 1: enforce regime direction from EA real data
-                regime = symbol_regimes.get(sym_w, "NEUTRAL")
-                forced_action = _regime_action(regime)
-                if forced_action:
-                    winner["action"] = forced_action
-                    print(f"  [REGIME] {sym_w} is {regime} → forcing {forced_action}")
-                stage2[group] = winner
-                print(f"  {group}: {sym_w} {winner.get('action')} [{regime}] ({winner.get('confidence')})")
-            time.sleep(1)
-        scan_results["stage2"] = stage2
+        available = [s for s in all_syms
+                     if s not in recently_traded
+                     and s not in open_syms
+                     and is_asset_open(s)]
 
-        # ── STAGE 3: Global champion ───────────────────────────────────────────
-        if not stage2:
-            print("[SCANNER] No group winners found")
+        print(f"[SCANNER] Available: {available} | Open: {list(open_syms)}")
+
+        if not available:
+            print("[SCANNER] No available symbols — all blocked or market closed")
+            scan_results["global_winner"] = None
             return
 
-        print("[SCANNER] Stage 3: Selecting global champion...")
-        global_winner = _pick_global_winner(list(stage2.values()), recently_traded)
+        # ── Step 3: Claude picks best symbol and direction ────────────────────
+        sym    = available[0]   # Default fallback
+        action = "BUY"
+        try:
+            utc_hour = datetime.utcnow().hour
+            session  = "London" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian"
+            resp = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=80,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Session: {session} UTC. Pick the best trade from: {', '.join(available)}.\n"
+                        f"Reply ONLY with JSON: {{\"symbol\":\"GOLD\",\"action\":\"BUY\"}}\n"
+                        f"action must be BUY or SELL. symbol must be from the list. JSON only."
+                    )
+                }]
+            )
+            text  = resp.content[0].text.strip()
+            start = text.find("{")
+            end   = text.rfind("}") + 1
+            if start >= 0 and end > start:
+                r      = json.loads(text[start:end])
+                raw    = str(r.get("symbol","")).upper().strip()
+                act    = str(r.get("action","BUY")).upper().strip()
+                sym    = raw    if raw in available else available[0]
+                action = act    if act in ["BUY","SELL"] else "BUY"
+            print(f"[SCANNER] Claude picked: {sym} {action}")
+        except Exception as e:
+            print(f"[SCANNER] Claude pick error: {e} — using {sym} {action}")
 
-        if not global_winner:
-            print("[SCANNER] No global winner selected")
-            return
+        # Update scan_results so Command Centre shows the pick
+        scan_results["stage1"] = {g: [s for s in a if is_asset_open(s)][:3]
+                                   for g, a in ASSET_GROUPS.items()
+                                   if any(is_asset_open(s) for s in a)}
+        scan_results["stage2"] = {"Selected": {"symbol": sym, "action": action,
+                                                "confidence": "MEDIUM", "signal_type": "BB_BREAKOUT",
+                                                "reason": f"Scanner pick — {datetime.utcnow().strftime('%H:%M')} UTC"}}
 
-        sym      = global_winner.get("symbol", "")
-        action   = str(global_winner.get("action", "BUY")).upper()
-        score    = int(global_winner.get("score", 3))
-        score    = max(1, min(5, score))
-        conf     = global_winner.get("confidence", "MEDIUM")
-        sig_type = global_winner.get("signal_type", "RANGE").upper()
-        if sig_type not in ["RANGE", "BB_BREAKOUT"]: sig_type = "RANGE"
+        # ── Step 4: Validate — try all available until score ≥ 2 ──────────────
+        # EA Gate 1 (MinScore=3) is the final quality filter
+        # Scanner just needs to find ONE candidate worth sending
+        final_sym    = None
+        final_action = None
+        final_score  = 0
 
-        print(f"[SCANNER] ★ GLOBAL WINNER: {sym} {action} Score:{score} Type:{sig_type} Conf:{conf}")
-        scan_results["global_winner"] = global_winner
+        # Try Claude's pick first, then others
+        candidates_to_try = [sym] + [s for s in available if s != sym]
 
-        # v6.3: Don't fire if score too low
-        if score < 3:
-            print(f"[SCANNER] Score too low ({score}) — no trade fired")
-            return
+        for try_sym in candidates_to_try[:5]:  # Try up to 5 symbols
+            score = _claude_validate(try_sym, action, "0", "BB")
+            print(f"[SCANNER] {try_sym} {action} → Score:{score}/5")
+            if score >= 3:
+                final_sym    = try_sym
+                final_action = action
+                final_score  = score
+                break
+            elif score >= 2 and not final_sym:
+                # Keep as backup — only use if nothing scores 3+
+                final_sym    = try_sym
+                final_action = action
+                final_score  = score
 
-        # v6.8 FIX: Combined block check — open position OR rotation guard
-        # Both now try next best group winner instead of giving up
-        def is_recent(s): return s in recently_traded
-        open_positions = mt5_status.get("positions", [])
-        open_symbols   = [str(p.get("symbol","")).upper() for p in open_positions]
+        if not final_sym:
+            # Last resort — fire first available, EA Gate 1 decides
+            final_sym    = available[0]
+            final_action = action
+            final_score  = _claude_validate(final_sym, final_action, "0", "BB")
+            print(f"[SCANNER] Using best available: {final_sym} Score:{final_score}")
 
-        def is_blocked(s):
-            return s.upper() in open_symbols or is_recent(s)
+        print(f"[SCANNER] Final pick: {final_sym} {final_action} Score:{final_score}/5")
 
-        if is_blocked(sym):
-            reason = "already open" if sym.upper() in open_symbols else "rotation guard"
-            print(f"[SCANNER] {sym} blocked ({reason}) — trying next best group winner...")
-            all_winners = list(stage2.values())
-            fallback_winner = None
-            for w in all_winners:
-                candidate = str(w.get("symbol",""))
-                if not is_blocked(candidate):
-                    fallback_winner = w
-                    break
-            if not fallback_winner:
-                print(f"[SCANNER] All group winners blocked — no signal fired")
-                return
-            global_winner = fallback_winner
-            sym      = str(global_winner.get("symbol",""))
-            action   = str(global_winner.get("action","BUY")).upper()
-            score    = max(1, min(5, int(global_winner.get("score",3) or 3)))
-            sig_type = str(global_winner.get("signal_type","RANGE")).upper()
-            if sig_type not in ["RANGE","BB_BREAKOUT"]: sig_type = "RANGE"
-            conf     = str(global_winner.get("confidence","MEDIUM")).upper()
-            scan_results["global_winner"] = global_winner
-            print(f"[SCANNER] Fallback winner: {sym} {action} [{sig_type}]")
+        scan_results["global_winner"] = {
+            "symbol": final_sym, "action": final_action, "score": final_score,
+            "signal_type": "BB_BREAKOUT", "confidence": "MEDIUM",
+            "reason": f"Auto-scanner — score {final_score}/5"
+        }
+
         if pending_signal:
             print("[SCANNER] Signal already pending — skipping")
             return
 
+        # ── Step 5: Fire signal — IDENTICAL format to Test Signal ─────────────
         pending_signal = {
-            "symbol":      sym,
-            "action":      action,
+            "symbol":      final_sym,
+            "action":      final_action,
             "price":       "0",
-            "score":       str(score),
-            "signal_type": sig_type,
-            "confidence":  conf,
-            "reason":      global_winner.get("reason", ""),
+            "score":       str(final_score),
+            "signal_type": "BB_BREAKOUT",
             "source":      "scanner",
             "timestamp":   datetime.utcnow().isoformat()
         }
-        _add_to_history(sym, action, score, sig_type)
-        print(f"[SCANNER] ✅ Signal fired → {sym} {action} [{sig_type}] Score:{score}")
+        _add_to_history(final_sym, final_action, final_score, "BB")
+        print(f"[SCANNER] ✅ Signal fired → {final_sym} {final_action} Score:{final_score}/5")
 
 # ─── Background Scanner Thread ─────────────────────────────────────────────────
 def scanner_loop():
