@@ -1,11 +1,15 @@
 """
-Claude-Market Webhook Server v7.3
+Claude-Market Webhook Server v7.4
 Lukas Ferreira - Pretoria ZA
-MCAPI ENGINE 4 — ASSET PERSONALITY + ENGINE 6 — STRUCTURE
-v7.3: AUDJPY and forex pairs removed from active scan list
-      Scanner now only scans: USDZAR, GOLD, SILVER, BTCUSD, ETHUSD, US_TECH100
-      Engine 6: no BB data now BLOCKS (was auto-passing — root cause of AUDJPY signals)
-      All signals now guaranteed to come from symbols with live MT5 charts
+MCAPI ENGINE 1 ENHANCED — REGIME DIRECTION GATE
+v7.4: Layer 1 Enhanced — regime direction gate added to scanner
+      No symbol BUYs in BEARISH regime (key fix: BTCUSD losses)
+      No symbol SELLs in BULLISH regime
+      NEUTRAL regime → both BUY and SELL allowed (mean reversion)
+      Per-symbol: GOLD can be BULLISH while BTCUSD is BEARISH
+      Scanner tries alternatives if first pick is regime-blocked
+      /regime endpoint now includes regime_check results
+      Pure webhook change — no EA update required
 Model: claude-sonnet-4-6
 """
 
@@ -331,7 +335,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "7.3",
+        "version": "7.4",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -821,6 +825,51 @@ def _regime_action(regime):
     """Convert regime to allowed trade action"""
     if regime == "BULLISH": return "BUY"
     if regime == "BEARISH": return "SELL"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MCAPI ENGINE 1 ENHANCED — REGIME DIRECTION GATE
+# Layer 1 Enhanced: No symbol BUYs in a BEARISH regime
+#                   No symbol SELLs in a BULLISH regime
+#                   NEUTRAL → both directions allowed (mean reversion)
+#
+# Data source: EA status POST → symbol_regimes dict (EMA50/200 + ADX H1)
+# Per-symbol: GOLD can be BULLISH while BTCUSD is BEARISH simultaneously
+# ══════════════════════════════════════════════════════════════════════════════
+def _check_regime_direction(symbol, action, regime):
+    """
+    Engine 1 Enhanced: Does the proposed action match the current regime?
+    Returns (allowed: bool, reason: str)
+
+    BULLISH  → BUY only    (SELL blocked — trade WITH the trend)
+    BEARISH  → SELL only   (BUY blocked — the key fix for BTC losses)
+    NEUTRAL  → both OK     (mean reversion — lower BB BUY + upper BB SELL)
+    No data  → BUY allowed (fail open — don't block due to missing regime data)
+    """
+    sym = symbol.upper()
+
+    if not regime or regime == "NEUTRAL":
+        return True, (f"ENGINE1 ✅ {sym} NEUTRAL — both directions allowed "
+                      f"(mean reversion mode)")
+
+    if regime == "BULLISH":
+        if action == "BUY":
+            return True, (f"ENGINE1 ✅ {sym} BULLISH + BUY → ALIGNED "
+                          f"(trading with the trend)")
+        else:
+            return False, (f"ENGINE1 ❌ {sym} BULLISH regime — SELL blocked. "
+                           f"Only BUY signals in an uptrend.")
+
+    if regime == "BEARISH":
+        if action == "SELL":
+            return True, (f"ENGINE1 ✅ {sym} BEARISH + SELL → ALIGNED "
+                          f"(trading with the trend)")
+        else:
+            return False, (f"ENGINE1 ❌ {sym} BEARISH regime — BUY blocked. "
+                           f"Layer 1 Enhanced: never buy into a downtrend. "
+                           f"Wait for regime to flip to NEUTRAL or BULLISH.")
+
+    # Unknown regime — fail open, allow signal
+    return True, f"ENGINE1 ✅ {sym} regime={regime} — unknown state, signal allowed"
     return None  # NEUTRAL = Claude decides
 
 
@@ -1144,7 +1193,35 @@ def run_scanner():
 
         print(f"[ENGINE4] Final pick: {final_sym} {final_action} Score:{final_score}/5")
 
-        # ── Step 5: ENGINE 6 — Structure Check ───────────────────────────────
+        # ── Step 4.5: ENGINE 1 ENHANCED — Regime Direction Gate ──────────────
+        # BTC never BUYs in BEARISH. No symbol fights its regime.
+        # Regime data comes from EA EMA50/200 + ADX H1 on each chart.
+        regime     = symbol_regimes.get(final_sym.upper(), "NEUTRAL")
+        reg_ok, reg_reason = _check_regime_direction(final_sym, final_action, regime)
+        print(f"[ENGINE1] {reg_reason}")
+        scan_results["regime_check"] = {
+            "symbol": final_sym, "action": final_action,
+            "regime": regime, "passed": reg_ok, "reason": reg_reason,
+            "all_regimes": dict(symbol_regimes)
+        }
+
+        if not reg_ok:
+            # Try alternatives whose regime aligns with the action
+            regime_found = False
+            for alt_sym in candidates_to_try[:5]:
+                if alt_sym == final_sym:
+                    continue
+                alt_regime  = symbol_regimes.get(alt_sym.upper(), "NEUTRAL")
+                alt_ok, alt_reason = _check_regime_direction(alt_sym, final_action, alt_regime)
+                if alt_ok:
+                    print(f"[ENGINE1] Alternative: {alt_sym} regime={alt_regime} — switching")
+                    final_sym   = alt_sym
+                    regime_found = True
+                    break
+            if not regime_found:
+                print(f"[ENGINE1] All candidates blocked by regime — signal held. "
+                      f"Waiting for regime alignment on next scan.")
+                return
         # Is price at the RIGHT LOCATION on the Bollinger Bands?
         # Only applies to symbols with BB data (5 charted symbols)
         struct_ok, struct_reason = _check_structure(final_sym, final_action)
