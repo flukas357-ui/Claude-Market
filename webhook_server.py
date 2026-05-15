@@ -1,12 +1,16 @@
+
 """
-Claude-Market Webhook Server v7.5
+Claude-Market Webhook Server v7.6
 Lukas Ferreira - Pretoria ZA
-MCAPI ENGINE 1 ENHANCED + PERSISTENT DATABASE
-v7.5: PostgreSQL database added — trade history survives every deploy
-      Closed trades saved to DB on arrival — loaded back on startup
-      Deleted tickets stored in DB — never reappear after restart
-      Layer 1 Enhanced regime gate active
-      No EA update required
+MCAPI ENGINE 7 — SESSION RISK MANAGEMENT
+v7.6: Engine 7 full — session-based risk (not arbitrary daily resets)
+      Portfolio drawdown from session start → pause all trading
+      Per-symbol session losses → pause that symbol for session
+      Consecutive loss guard → pause symbol until next win
+      Session resets at 04:00 UTC (06:00 SAST) — Lukas's natural start
+      /risk endpoint — live risk status for Config Tab
+      EA v9.0 Gate 6 enforces same rules locally
+      Database persistent trade history active
 Model: claude-sonnet-4-6
 """
 
@@ -188,6 +192,31 @@ recently_traded  = {}  # {symbol: datetime} — 6-hour expiry rotation guard
 scan_lock        = threading.Lock()
 symbol_regimes   = {}  # Engine 1: {symbol: "BULLISH"/"NEUTRAL"/"BEARISH"}
 bb_data          = {}  # Engine 6: {symbol: {upper,middle,lower,price,location,range}}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE 7 — SESSION RISK STATE
+# Tracks portfolio drawdown + per-symbol session losses
+# Resets at 04:00 UTC (06:00 SAST) — Lukas's natural session start
+# Per-symbol: session losses reset at symbol's natural session open
+# Consecutive losses: reset only after a WIN on that symbol
+# ══════════════════════════════════════════════════════════════════════════════
+e7_risk = {
+    "session_start_equity":   None,    # Equity at session start
+    "session_start_time":     None,    # When session started
+    "current_equity":         None,    # Last known equity from EA
+    "portfolio_drawdown_pct": 0.0,     # Current drawdown from session start
+    "portfolio_paused":       False,   # True when drawdown limit hit
+    "symbol_session_losses":  {},      # {symbol: int} losses this session
+    "symbol_consecutive":     {},      # {symbol: int} consecutive losses
+    "symbol_paused":          {},      # {symbol: True/False}
+    "last_session_reset":     None,    # Last reset timestamp
+    "limits": {
+        "max_drawdown_pct":   5.0,     # From Config Tab Engine 7
+        "max_session_losses": 2,       # Per symbol per session
+        "max_consecutive":    3,       # Consecutive losses before pause
+        "reset_hour_utc":     4,       # 04:00 UTC = 06:00 SAST
+    }
+}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MCAPI ENGINE 6 — STRUCTURE: Location Check
@@ -465,7 +494,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "7.5",
+        "version": "7.6",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -582,6 +611,11 @@ def receive_status():
                       f"lower={bbd.get('lower',0):.2f} "
                       f"price={bbd.get('price',0):.2f}")
 
+        # Engine 7: Track portfolio equity for drawdown calculation
+        equity = data.get("equity")
+        if equity:
+            _e7_update_equity(float(equity))
+
         # Extract closed trades if EA sends them
         for t in data.get("closed_trades", []):
             tickets = [x["ticket"] for x in trade_history]
@@ -619,7 +653,8 @@ def post_history():
             source = data.get("source", "EA")
             symbol = data.get("symbol", "?")
             profit = data.get("profit", 0)
-            db_save_trade(data)  # ← persist to database
+            db_save_trade(data)
+            _e7_record_close(symbol, float(profit))   # Engine 7 session tracking
             print(f"[HISTORY] Received closed trade: {symbol} ${profit:.2f} [{source}]")
         return jsonify({"ok": True})
     except Exception as e:
@@ -684,6 +719,108 @@ def scanner_results():
 def manual_scan():
     threading.Thread(target=run_scanner, daemon=True).start()
     return jsonify({"status": "Scanner triggered manually"})
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE 7 HELPERS — Session Risk Management
+# ══════════════════════════════════════════════════════════════════════════════
+def _e7_update_equity(equity: float):
+    """Called every /status POST. Tracks drawdown from session start."""
+    e7_risk["current_equity"] = equity
+    if e7_risk["session_start_equity"] is None:
+        e7_risk["session_start_equity"] = equity
+        e7_risk["session_start_time"]   = datetime.utcnow().isoformat()
+        print(f"[E7] Session equity initialised: ${equity:.2f}")
+        return
+    start  = e7_risk["session_start_equity"]
+    dd_pct = round(((start - equity) / start * 100) if start > 0 else 0.0, 2)
+    e7_risk["portfolio_drawdown_pct"] = dd_pct
+    limit  = e7_risk["limits"]["max_drawdown_pct"]
+    if dd_pct > limit and not e7_risk["portfolio_paused"]:
+        e7_risk["portfolio_paused"] = True
+        print(f"[E7] ⛔ PORTFOLIO PAUSED — drawdown {dd_pct:.1f}% > {limit}% limit")
+    elif dd_pct <= limit and e7_risk["portfolio_paused"]:
+        e7_risk["portfolio_paused"] = False
+        print(f"[E7] ✅ Portfolio recovered to {dd_pct:.1f}% — trading resumed")
+
+def _e7_record_close(symbol: str, profit: float):
+    """Called when a trade closes. Updates session and consecutive loss counts."""
+    sym = symbol.upper()
+    if profit < 0:
+        e7_risk["symbol_session_losses"][sym]  = e7_risk["symbol_session_losses"].get(sym, 0) + 1
+        e7_risk["symbol_consecutive"][sym]     = e7_risk["symbol_consecutive"].get(sym, 0) + 1
+        sl = e7_risk["symbol_session_losses"][sym]
+        cl = e7_risk["symbol_consecutive"][sym]
+        lim_s = e7_risk["limits"]["max_session_losses"]
+        lim_c = e7_risk["limits"]["max_consecutive"]
+        print(f"[E7] {sym} LOSS — session:{sl}/{lim_s} | consecutive:{cl}/{lim_c}")
+        if sl >= lim_s or cl >= lim_c:
+            e7_risk["symbol_paused"][sym] = True
+            reason = "session losses" if sl >= lim_s else "consecutive losses"
+            print(f"[E7] ⛔ {sym} PAUSED — {reason} limit reached")
+    else:
+        prev = e7_risk["symbol_consecutive"].get(sym, 0)
+        if prev > 0:
+            print(f"[E7] {sym} WIN — consecutive streak reset (was {prev})")
+        e7_risk["symbol_consecutive"][sym] = 0
+        if e7_risk["symbol_session_losses"].get(sym, 0) < e7_risk["limits"]["max_session_losses"]:
+            e7_risk["symbol_paused"][sym] = False
+
+def _e7_session_reset():
+    """Reset session equity and per-symbol session counters."""
+    equity = e7_risk.get("current_equity") or e7_risk.get("session_start_equity", 0)
+    e7_risk["session_start_equity"]   = equity
+    e7_risk["session_start_time"]     = datetime.utcnow().isoformat()
+    e7_risk["portfolio_drawdown_pct"] = 0.0
+    e7_risk["portfolio_paused"]       = False
+    e7_risk["symbol_session_losses"]  = {}
+    e7_risk["symbol_paused"]          = {}
+    e7_risk["last_session_reset"]     = datetime.utcnow().isoformat()
+    print(f"[E7] ═══ SESSION RESET ═══ New start equity: ${equity:.2f}")
+
+def _e7_check_session_reset():
+    """Check and execute session reset if due (04:00 UTC = 06:00 SAST)."""
+    now = datetime.utcnow()
+    if now.hour == e7_risk["limits"]["reset_hour_utc"] and now.minute < 31:
+        last = e7_risk.get("last_session_reset")
+        if last:
+            if (now - datetime.fromisoformat(last)).total_seconds() > 3600:
+                _e7_session_reset()
+        else:
+            _e7_session_reset()
+
+def _e7_check_scanner(symbol: str) -> tuple:
+    """Engine 7 scanner gate. Returns (allowed, reason)."""
+    if e7_risk["portfolio_paused"]:
+        dd  = e7_risk["portfolio_drawdown_pct"]
+        lim = e7_risk["limits"]["max_drawdown_pct"]
+        return False, (f"E7 ⛔ PORTFOLIO PAUSED — drawdown {dd:.1f}% > {lim}% limit. "
+                       f"Resets at {e7_risk['limits']['reset_hour_utc']:02d}:00 UTC (06:00 SAST)")
+    sym = symbol.upper()
+    if e7_risk["symbol_paused"].get(sym):
+        sl = e7_risk["symbol_session_losses"].get(sym, 0)
+        cl = e7_risk["symbol_consecutive"].get(sym, 0)
+        return False, (f"E7 ⛔ {sym} PAUSED — session:{sl} | consecutive:{cl}")
+    dd = e7_risk["portfolio_drawdown_pct"]
+    return True, f"E7 ✅ Risk OK — drawdown:{dd:.1f}% | {sym} session losses:{e7_risk['symbol_session_losses'].get(sym,0)}"
+
+@app.route("/risk", methods=["GET"])
+def get_risk():
+    """Engine 7: Live session risk status — Config Tab reads this"""
+    _e7_check_session_reset()
+    return jsonify({
+        "engine":                "7 — Session Risk Management",
+        "session_start_equity":  e7_risk["session_start_equity"],
+        "current_equity":        e7_risk["current_equity"],
+        "portfolio_drawdown_pct":e7_risk["portfolio_drawdown_pct"],
+        "portfolio_paused":      e7_risk["portfolio_paused"],
+        "symbol_session_losses": e7_risk["symbol_session_losses"],
+        "symbol_consecutive":    e7_risk["symbol_consecutive"],
+        "symbol_paused":         e7_risk["symbol_paused"],
+        "limits":                e7_risk["limits"],
+        "last_session_reset":    e7_risk["last_session_reset"],
+        "session_start_time":    e7_risk["session_start_time"],
+        "timestamp":             datetime.utcnow().isoformat(),
+    })
 
 # ─── Keep-alive ping endpoint ─────────────────────────────────────────────────
 @app.route("/regime", methods=["GET"])
@@ -1196,6 +1333,14 @@ def run_scanner():
             print("[SCANNER] Skipped — kill switch active")
             return
 
+        # Engine 7: Check session reset + portfolio risk gate
+        _e7_check_session_reset()
+        e7_ok, e7_reason = _e7_check_scanner("PORTFOLIO")
+        if not e7_ok:
+            print(f"[ENGINE7] {e7_reason}")
+            scan_results["e7_status"] = {"passed": False, "reason": e7_reason}
+            return
+
         # ── Step 1: Clean rotation guard ─────────────────────────────────────
         cutoff = datetime.utcnow() - timedelta(hours=6)
         for s in [k for k, v in list(recently_traded.items()) if v < cutoff]:
@@ -1325,7 +1470,24 @@ def run_scanner():
 
         print(f"[ENGINE4] Final pick: {final_sym} {final_action} Score:{final_score}/5")
 
-        # ── Step 4.5: ENGINE 1 ENHANCED — Regime Direction Gate ──────────────
+        # ── Step 4.4: ENGINE 7 — Symbol-level risk gate ───────────────────────
+        e7_sym_ok, e7_sym_reason = _e7_check_scanner(final_sym)
+        print(f"[ENGINE7] {e7_sym_reason}")
+        if not e7_sym_ok:
+            # Try alternatives that are not paused
+            e7_found = False
+            for alt_sym in candidates_to_try[:5]:
+                if alt_sym == final_sym:
+                    continue
+                alt_ok, alt_reason = _e7_check_scanner(alt_sym)
+                if alt_ok:
+                    print(f"[ENGINE7] Alternative: {alt_sym} — {alt_reason}")
+                    final_sym = alt_sym
+                    e7_found  = True
+                    break
+            if not e7_found:
+                print(f"[ENGINE7] All candidates paused by risk management — holding")
+                return
         # BTC never BUYs in BEARISH. No symbol fights its regime.
         # Regime data comes from EA EMA50/200 + ADX H1 on each chart.
         regime     = symbol_regimes.get(final_sym.upper(), "NEUTRAL")
