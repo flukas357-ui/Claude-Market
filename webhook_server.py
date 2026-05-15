@@ -1,4 +1,4 @@
-"""   
+"""
 Claude-Market Webhook Server v7.0
 Lukas Ferreira - Pretoria ZA
 MCAPI ENGINE 4 — ASSET PERSONALITY
@@ -11,7 +11,7 @@ v7.0: Per-symbol personality config
       /personality/update POST endpoint for live config changes
 Model: claude-sonnet-4-6
 """
-
+ 
 from flask import Flask, request, jsonify
 import anthropic
 import threading
@@ -20,10 +20,10 @@ import json
 import urllib.request
 from datetime import datetime, timedelta
 import os
-
+ 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-
+ 
 # ─── CORS — allow Command Centre to fetch from any origin ─────────────────────
 @app.after_request
 def add_cors(response):
@@ -31,12 +31,12 @@ def add_cors(response):
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
-
+ 
 @app.route("/", methods=["OPTIONS"])
 @app.route("/<path:path>", methods=["OPTIONS"])
 def handle_options(path=""):
     return "", 204
-
+ 
 # ─── State ────────────────────────────────────────────────────────────────────
 pending_signal   = None          # Signal waiting for EA to pick up
 close_signal     = None          # Close signal for EA (future auto-close)
@@ -56,7 +56,7 @@ scan_results     = {             # Scanner intelligence data
 recently_traded  = {}  # {symbol: datetime} — 6-hour expiry rotation guard
 scan_lock        = threading.Lock()
 symbol_regimes   = {}  # Engine 1: {symbol: "BULLISH"/"NEUTRAL"/"BEARISH"}
-
+ 
 # ─── Asset Universe — Ava broker symbol names ─────────────────────────────────
 ASSET_GROUPS = {
     "Forex Majors":  ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURGBP","EURJPY"],
@@ -66,7 +66,7 @@ ASSET_GROUPS = {
     "Crypto":        ["BTCUSD","ETHUSD"],
     "SA & Emerging": ["USDZAR","EURZAR","GBPZAR"]
 }
-
+ 
 # ══════════════════════════════════════════════════════════════════════════════
 # MCAPI ENGINE 4 — ASSET PERSONALITY
 # Per-symbol settings that override global defaults
@@ -98,7 +98,7 @@ PERSONALITY = {
         "location_zone":  0.33,
         "notes":          "Volatile. Max 2/day. Needs structure check."
     },
-
+ 
     # ── CRYPTO ─────────────────────────────────────────────────────────────────
     "BTCUSD": {
         "blacklist":      False,
@@ -124,7 +124,7 @@ PERSONALITY = {
         "location_zone":  0.33,
         "notes":          "Less volatile than BTC. Follows BTC direction."
     },
-
+ 
     # ── FOREX MAJORS ───────────────────────────────────────────────────────────
     "EURUSD": {
         "blacklist":      False,
@@ -180,7 +180,7 @@ PERSONALITY = {
         "location_zone":  0.33,
         "notes":          "Oil-correlated. NY session only."
     },
-
+ 
     # ── SA & EMERGING ──────────────────────────────────────────────────────────
     "USDZAR": {
         "blacklist":      False,
@@ -215,11 +215,11 @@ PERSONALITY = {
         "notes":          "Asian session. Commodity currency."
     },
 }
-
+ 
 # Daily trade counter — resets at midnight UTC
 _daily_trades = {}   # {symbol: count}
 _daily_date   = None # Date string for reset check
-
+ 
 def _get_personality(symbol):
     """Get personality config for a symbol with safe defaults"""
     return PERSONALITY.get(symbol, {
@@ -232,54 +232,54 @@ def _get_personality(symbol):
         "location_zone": 0.33,
         "notes":         "Default personality — no custom config"
     })
-
+ 
 def _personality_check(symbol, action, session):
     """
     ENGINE 4: Personality gate — returns (allowed, reason)
     Checks: blacklist / session / daily limit / min_score threshold
     """
     global _daily_trades, _daily_date
-
+ 
     p = _get_personality(symbol)
-
+ 
     # Reset daily counter at midnight UTC
     today = datetime.utcnow().strftime("%Y-%m-%d")
     if _daily_date != today:
         _daily_trades = {}
         _daily_date   = today
-
+ 
     # 1. Blacklist check
     if p.get("blacklist", False):
         reason = p.get("blacklist_reason", "Blacklisted")
         return False, f"BLACKLISTED: {reason}"
-
+ 
     # 2. Session check
     allowed_sessions = p.get("sessions", ["London","New York","Asian"])
     if session not in allowed_sessions:
         return False, f"WRONG SESSION: {symbol} runs in {allowed_sessions}, not {session}"
-
+ 
     # 3. Daily trade limit
     daily_count = _daily_trades.get(symbol, 0)
     max_daily   = p.get("max_daily", 3)
     if daily_count >= max_daily:
         return False, f"DAILY LIMIT: {symbol} already traded {daily_count}/{max_daily} times today"
-
+ 
     return True, f"PERSONALITY OK: priority={p.get('priority',1)}, session={session}"
-
+ 
 def _personality_min_score(symbol):
     """Get per-symbol minimum score threshold"""
     return _get_personality(symbol).get("min_score", 3)
-
+ 
 def _personality_priority(symbol):
     """Get scanner priority (higher = picked first)"""
     return _get_personality(symbol).get("priority", 1)
-
+ 
 def _personality_record_trade(symbol):
     """Record that a trade was fired for this symbol today"""
     global _daily_trades
     _daily_trades[symbol] = _daily_trades.get(symbol, 0) + 1
     print(f"[ENGINE4] {symbol} daily count: {_daily_trades[symbol]}")
-
+ 
 # ─── Health Check ─────────────────────────────────────────────────────────────
 @app.route("/", methods=["GET"])
 def root():
@@ -296,7 +296,7 @@ def root():
         "mt5_connected": bool(mt5_status.get("timestamp")),
         "timestamp": datetime.utcnow().isoformat()
     })
-
+ 
 # ─── API Key Test ─────────────────────────────────────────────────────────────
 @app.route("/test/apikey", methods=["GET"])
 def test_apikey():
@@ -309,7 +309,7 @@ def test_apikey():
         return jsonify({"status":"success","response":resp.content[0].text,"key_prefix":os.environ.get("ANTHROPIC_API_KEY","")[:12]+"..."})
     except Exception as e:
         return jsonify({"status":"error","error":str(e),"key_prefix":os.environ.get("ANTHROPIC_API_KEY","")[:12]+"..."})
-
+ 
 # ─── TradingView Webhook ───────────────────────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -318,27 +318,27 @@ def webhook():
         data = request.get_json(force=True)
         if not data:
             return jsonify({"error": "No JSON payload"}), 400
-
+ 
         secret = data.get("secret", "")
         if secret != "claude-market-2026":
             return jsonify({"error": "Invalid secret"}), 401
-
+ 
         symbol = str(data.get("ticker", data.get("symbol", ""))).upper().strip()
         action = str(data.get("action", "BUY")).upper().strip()
         price  = data.get("price", "0")
-
+ 
         if not symbol:
             return jsonify({"error": "Missing symbol"}), 400
         if action not in ["BUY", "SELL"]:
             return jsonify({"error": f"Invalid action: {action}"}), 400
-
+ 
         if not trading_enabled:
             return jsonify({"status": "blocked", "reason": "Kill switch active"}), 200
-
+ 
         score = _claude_validate(symbol, action, price, "BB")
         if score < 3:
             return jsonify({"status": "rejected", "reason": "Score too low", "score": score}), 200
-
+ 
         pending_signal = {
             "symbol": symbol,
             "action": action,
@@ -350,7 +350,7 @@ def webhook():
         }
         _add_to_history(symbol, action, score, "BB")
         print(f"[SIGNAL] TradingView → {symbol} {action} Score:{score}/5")
-
+ 
         return jsonify({
             "status": "signal_stored",
             "symbol": symbol,
@@ -361,7 +361,7 @@ def webhook():
     except Exception as e:
         print(f"[ERROR] /webhook: {e}")
         return jsonify({"error": str(e)}), 500
-
+ 
 # ─── EA Signal Poll ────────────────────────────────────────────────────────────
 @app.route("/signal", methods=["GET"])
 def get_signal():
@@ -372,7 +372,7 @@ def get_signal():
     pending_signal = None        # Clear once delivered
     print(f"[SIGNAL] Delivered to EA: {sig['symbol']} {sig['action']}")
     return jsonify({"signal": True, **sig})
-
+ 
 # ─── EA Status Receiver ────────────────────────────────────────────────────────
 @app.route("/status", methods=["POST"])
 def receive_status():
@@ -381,7 +381,7 @@ def receive_status():
         data = request.get_json(force=True)
         mt5_status = data
         mt5_status["received_at"] = datetime.utcnow().isoformat()
-
+ 
         # v6.6 Engine 1: Read REAL regime from EA (EMA50/200 + ADX14 calculated in MQL5)
         ea_sym    = str(data.get("symbol","")).strip().upper()
         ea_regime = str(data.get("regime","NEUTRAL")).upper().strip()
@@ -390,27 +390,27 @@ def receive_status():
                 print(f"[REGIME] {ea_sym} = {ea_regime} (EA: EMA50/200+ADX14 H1)")
             symbol_regimes[ea_sym] = ea_regime
             scan_results["regimes"] = dict(symbol_regimes)
-
+ 
         # Extract closed trades if EA sends them
         for t in data.get("closed_trades", []):
             tickets = [x["ticket"] for x in trade_history]
             if t.get("ticket") not in tickets:
                 trade_history.insert(0, t)
         trade_history = trade_history[:200]
-
+ 
         return jsonify({"ok": True, "trading_enabled": trading_enabled})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+ 
 @app.route("/status", methods=["GET"])
 def send_status():
     return jsonify(mt5_status if mt5_status else {"connected": False})
-
+ 
 # ─── Trade History ─────────────────────────────────────────────────────────────
 @app.route("/history", methods=["GET"])
 def get_history():
     return jsonify({"trades": trade_history, "count": len(trade_history)})
-
+ 
 @app.route("/history", methods=["POST"])
 def post_history():
     """EA can POST a closed trade directly (v8.3: includes source field MANUAL/EA)"""
@@ -432,7 +432,7 @@ def post_history():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+ 
 # ─── Kill Switch ───────────────────────────────────────────────────────────────
 @app.route("/history/delete", methods=["POST"])
 def delete_history():
@@ -452,8 +452,8 @@ def delete_history():
     except Exception as e:
         print(f"[ERROR] /history/delete: {e}")
         return jsonify({"error": str(e)}), 500
-
-
+ 
+ 
 @app.route("/trading/stop", methods=["GET","POST"])
 @app.route("/trading/pause", methods=["GET","POST"])
 def stop_trading():
@@ -462,14 +462,14 @@ def stop_trading():
     pending_signal  = None
     print("[KILL SWITCH] Trading STOPPED")
     return jsonify({"trading_enabled": False, "message": "All trading halted"})
-
+ 
 @app.route("/trading/resume", methods=["GET","POST"])
 def resume_trading():
     global trading_enabled
     trading_enabled = True
     print("[KILL SWITCH] Trading RESUMED")
     return jsonify({"trading_enabled": True, "message": "Trading resumed"})
-
+ 
 @app.route("/trading/status", methods=["GET"])
 def trading_status():
     # v6.4: recently_traded is a dict internally — return keys as list for Command Centre
@@ -479,19 +479,19 @@ def trading_status():
         "pending_signal": pending_signal is not None,
         "recently_traded": rt_list
     })
-
+ 
 # ─── Scanner Intelligence Endpoints ───────────────────────────────────────────
 @app.route("/scanner/results", methods=["GET"])
 def scanner_results():
     result = dict(scan_results)
     result["recently_traded"] = list(recently_traded.keys())  # Always return as list
     return jsonify(result)
-
+ 
 @app.route("/scanner/run", methods=["GET","POST"])
 def manual_scan():
     threading.Thread(target=run_scanner, daemon=True).start()
     return jsonify({"status": "Scanner triggered manually"})
-
+ 
 # ─── Keep-alive ping endpoint ─────────────────────────────────────────────────
 @app.route("/regime", methods=["GET"])
 def get_regimes():
@@ -503,7 +503,7 @@ def get_regimes():
         "bearish": [s for s,r in symbol_regimes.items() if r=="BEARISH"],
         "neutral": [s for s,r in symbol_regimes.items() if r=="NEUTRAL"]
     })
-
+ 
 @app.route("/session", methods=["GET"])
 def get_session():
     """Engine 2: Live market open/closed status per symbol"""
@@ -518,7 +518,7 @@ def get_session():
         "count_open": len(open_syms),
         "symbols":   status
     })
-
+ 
 @app.route("/rotation", methods=["GET"])
 def get_rotation():
     """Show current rotation guard — which symbols are blocked and when they expire"""
@@ -529,7 +529,7 @@ def get_rotation():
         status[sym] = {"expires_in_hours": round(max(0, 6 - age_hours), 1)}
     return jsonify({"blocked": list(recently_traded.keys()),
                     "count": len(recently_traded), "detail": status})
-
+ 
 @app.route("/rotation/clear", methods=["GET","POST"])
 def clear_rotation():
     """Manually clear rotation guard — use when all symbols are stuck"""
@@ -539,7 +539,7 @@ def clear_rotation():
     print(f"[ROTATION] Manual clear — removed: {cleared}")
     return jsonify({"ok": True, "cleared": cleared,
                     "message": "All symbols available again ✅"})
-
+ 
 @app.route("/personality", methods=["GET"])
 def get_personality():
     """ENGINE 4: Return all symbol personalities + today's trade counts"""
@@ -564,7 +564,7 @@ def get_personality():
                           if c.get("priority", 1) >= 3 and not c.get("blacklist")],
         "timestamp":     datetime.utcnow().isoformat()
     })
-
+ 
 @app.route("/personality/update", methods=["POST"])
 def update_personality():
     """ENGINE 4: Update a symbol's personality settings from Command Centre"""
@@ -583,7 +583,7 @@ def update_personality():
                         "personality": PERSONALITY[symbol]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+ 
 def ping():
     """Self-ping endpoint — keeps Render awake 24/7"""
     return jsonify({
@@ -593,7 +593,7 @@ def ping():
         "scanner_next_run": scan_results.get("next_run"),
         "trading": trading_enabled
     })
-
+ 
 # ─── Close Signal (future auto-close support) ─────────────────────────────────
 @app.route("/signal/close", methods=["POST"])
 def post_close_signal():
@@ -611,7 +611,7 @@ def post_close_signal():
         return jsonify({"ok": True, "symbol": symbol})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+ 
 @app.route("/signal/close", methods=["GET"])
 def get_close_signal():
     """EA polls this for close requests"""
@@ -622,7 +622,7 @@ def get_close_signal():
     close_signal = None
     print(f"[CLOSE] Signal delivered to EA: {sig['symbol']}")
     return jsonify({"close": True, **sig})
-
+ 
 # ─── 3-Stage Global Scanner ───────────────────────────────────────────────────
 def _claude_validate(symbol, action, price, sig_type):
     """Ask Claude AI to score a signal 1-5"""
@@ -646,7 +646,7 @@ def _claude_validate(symbol, action, price, sig_type):
     except Exception as e:
         print(f"[VALIDATE ERROR] {e}")
         return 3  # Default mid-score on failure
-
+ 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MCAPI ENGINE 1 — MARKET REGIME ENGINE
 # Classifies each asset as BULLISH / NEUTRAL / BEARISH before scanning
@@ -662,38 +662,38 @@ def is_asset_open(sym):
     now     = datetime.utcnow()
     weekday = now.weekday()          # 0=Mon … 6=Sun
     h       = now.hour + now.minute / 60.0   # decimal UTC hour
-
+ 
     # ── Crypto: always open 24/7 ──────────────────────────────────────────────
     if sym in ["BTCUSD","ETHUSD"]:
         return True
-
+ 
     # ── Weekend: only crypto is open ─────────────────────────────────────────
     if weekday == 6:                 # Sunday — forex opens 22:00 UTC
         return h >= 22.0
     if weekday == 5:                 # Saturday — all closed
         return False
-
+ 
     # ── Friday close — most markets close 22:00 UTC Friday ────────────────────
     if weekday == 4 and h >= 22.0:
         return False
-
+ 
     # ── US Indices: 14:30–21:00 UTC (16:30–23:00 SAST) ───────────────────────
     if sym in ["US_TECH100","NAS100","US_500","US_30"]:
         return 14.5 <= h <= 21.0
-
+ 
     # ── European Indices: 07:00–15:30 UTC ────────────────────────────────────
     if sym in ["GERMANY_40","UK_100","FRANCE_40"]:
         return 7.0 <= h <= 15.5
-
+ 
     # ── Asian Indices: 00:00–06:00 UTC ───────────────────────────────────────
     if sym in ["JAPAN_225"]:
         return h <= 6.0 or h >= 23.5
-
+ 
     # ── Forex, Metals, Oil, ZAR pairs: Mon–Fri broadly open ──────────────────
     # GOLD, SILVER, EURUSD, GBPUSD, USDZAR etc.
     return True
-
-
+ 
+ 
 def get_session_status():
     """Return open/closed status for all assets — used by /session endpoint"""
     all_syms = []
@@ -703,15 +703,15 @@ def get_session_status():
         sym: "OPEN" if is_asset_open(sym) else "CLOSED"
         for sym in all_syms
     }
-
-
-
+ 
+ 
+ 
     """Engine 1: Classify market regime for each asset in a group"""
     try:
         utc_hour = datetime.utcnow().hour
         session  = "London/Frankfurt" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian/Off-hours"
         asset_list = ", ".join(assets)
-
+ 
         resp = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=200,
@@ -748,15 +748,15 @@ def get_session_status():
     except Exception as e:
         print(f"[REGIME ERROR] {group_name}: {e}")
     return {sym: "NEUTRAL" for sym in assets}
-
-
+ 
+ 
 def _regime_action(regime):
     """Convert regime to allowed trade action"""
     if regime == "BULLISH": return "BUY"
     if regime == "BEARISH": return "SELL"
     return None  # NEUTRAL = Claude decides
-
-
+ 
+ 
 def _scan_group(group_name, assets):
     """Stage 1: Ask Claude to rank top 3 trading assets in a group"""
     try:
@@ -793,7 +793,7 @@ def _scan_group(group_name, assets):
     except Exception as e:
         print(f"[SCAN1 ERROR] {group_name}: {e}")
     return assets[:3]  # Fallback
-
+ 
 def _pick_group_winner(group_name, top5, recently):
     """Stage 2: Pick the single best asset from a group's top candidates"""
     try:
@@ -854,7 +854,7 @@ def _pick_group_winner(group_name, top5, recently):
                 "signal_type":"RANGE","reason":"Fallback pick","support":0,"resistance":0}
     print(f"[SCAN2] {group_name} fallback → {top5[0]}")
     return fallback
-
+ 
 def _pick_global_winner(group_winners, recently):
     """Stage 3: Pick the best opportunity across all group winners"""
     try:
@@ -912,7 +912,7 @@ def _pick_global_winner(group_winners, recently):
         print(f"[SCAN3] Fallback → {w.get('symbol')}")
         return w
     return None
-
+ 
 def _add_to_history(symbol, action, score, sig_type):
     """Track recently traded assets for rotation"""
     global recently_traded
@@ -920,7 +920,7 @@ def _add_to_history(symbol, action, score, sig_type):
              "type": sig_type, "time": datetime.utcnow().isoformat()}
     scan_results["history"].insert(0, entry)
     scan_results["history"] = scan_results["history"][:20]
-
+ 
     # v6.4: recently_traded with 6-hour expiry
     recently_traded[symbol] = datetime.utcnow()
     # Remove symbols older than 6 hours
@@ -929,7 +929,7 @@ def _add_to_history(symbol, action, score, sig_type):
     for s in expired:
         del recently_traded[s]
         print(f"[ROTATION] {s} expired from rotation guard")
-
+ 
 def run_scanner():
     """
     Simplified scanner v6.9 — uses same logic as Test Signal (known to work)
@@ -943,29 +943,29 @@ def run_scanner():
         print(f"\n[SCANNER] ═══ Starting — {datetime.utcnow().strftime('%H:%M UTC')} ═══")
         scan_results["last_run"] = datetime.utcnow().isoformat()
         scan_results["next_run"] = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
-
+ 
         if not trading_enabled:
             print("[SCANNER] Skipped — kill switch active")
             return
-
+ 
         # ── Step 1: Clean rotation guard ─────────────────────────────────────
         cutoff = datetime.utcnow() - timedelta(hours=6)
         for s in [k for k, v in list(recently_traded.items()) if v < cutoff]:
             del recently_traded[s]
             print(f"[ROTATION] {s} expired — available again")
         print(f"[ROTATION] Blocked: {list(recently_traded.keys())}")
-
+ 
         # ── Step 2: Build available symbol list with ENGINE 4 filter ─────────────
         open_syms = {str(p.get("symbol","")).upper()
                      for p in mt5_status.get("positions",[])}
-
+ 
         utc_hour = datetime.utcnow().hour
         session  = "London" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian"
-
+ 
         # Base symbol list — all non-blacklisted
         all_syms = ["GOLD","SILVER","BTCUSD","ETHUSD","EURUSD",
                     "GBPUSD","USDJPY","USDZAR","GBPJPY","AUDUSD","USDCAD","AUDJPY"]
-
+ 
         # Engine 4: Filter using personality
         available = []
         blocked_log = []
@@ -984,19 +984,19 @@ def run_scanner():
                 blocked_log.append(f"{s}({reason.split(':')[0]})")
                 continue
             available.append(s)
-
+ 
         # Engine 4: Sort by personality priority (highest first)
         available.sort(key=lambda s: _personality_priority(s), reverse=True)
-
+ 
         print(f"[ENGINE4] Session: {session}")
         print(f"[ENGINE4] Available (priority sorted): {available}")
         print(f"[ENGINE4] Blocked: {blocked_log}")
-
+ 
         if not available:
             print("[SCANNER] No available symbols after Engine 4 filter")
             scan_results["global_winner"] = None
             return
-
+ 
         # ── Step 3: Claude picks best symbol (personality-aware) ─────────────
         sym    = available[0]   # Default = highest priority symbol
         action = "BUY"
@@ -1010,7 +1010,7 @@ def run_scanner():
                     hint += ",TOP_PICK"
                 hint += ")"
                 priority_hints.append(hint)
-
+ 
             resp = client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=80,
@@ -1038,7 +1038,7 @@ def run_scanner():
             print(f"[ENGINE4] Claude picked: {sym} {action}")
         except Exception as e:
             print(f"[ENGINE4] Claude pick error: {e} — using {sym} {action}")
-
+ 
         # Update scan_results so Command Centre shows the pick
         scan_results["stage1"] = {g: [s for s in a if is_asset_open(s)][:3]
                                    for g, a in ASSET_GROUPS.items()
@@ -1046,14 +1046,14 @@ def run_scanner():
         scan_results["stage2"] = {"Selected": {"symbol": sym, "action": action,
                                                 "confidence": "MEDIUM", "signal_type": "BB_BREAKOUT",
                                                 "reason": f"Scanner pick — {datetime.utcnow().strftime('%H:%M')} UTC"}}
-
+ 
         # ── Step 4: Validate — per-symbol min_score from Engine 4 ────────────
         final_sym    = None
         final_action = None
         final_score  = 0
-
+ 
         candidates_to_try = [sym] + [s for s in available if s != sym]
-
+ 
         for try_sym in candidates_to_try[:5]:
             sym_min_score = _personality_min_score(try_sym)
             score = _claude_validate(try_sym, action, "0", "BB")
@@ -1067,25 +1067,25 @@ def run_scanner():
                 final_sym    = try_sym
                 final_action = action
                 final_score  = score
-
+ 
         if not final_sym:
             final_sym    = available[0]
             final_action = action
             final_score  = _claude_validate(final_sym, final_action, "0", "BB")
             print(f"[ENGINE4] Using best available: {final_sym} Score:{final_score}")
-
+ 
         print(f"[ENGINE4] Final pick: {final_sym} {final_action} Score:{final_score}/5")
-
+ 
         scan_results["global_winner"] = {
             "symbol": final_sym, "action": final_action, "score": final_score,
             "signal_type": "BB_BREAKOUT", "confidence": "MEDIUM",
             "reason": f"Auto-scanner — score {final_score}/5"
         }
-
+ 
         if pending_signal:
             print("[SCANNER] Signal already pending — skipping")
             return
-
+ 
         # ── Step 5: Fire signal — IDENTICAL format to Test Signal ─────────────
         pending_signal = {
             "symbol":      final_sym,
@@ -1099,7 +1099,7 @@ def run_scanner():
         _add_to_history(final_sym, final_action, final_score, "BB")
         _personality_record_trade(final_sym)
         print(f"[ENGINE4] ✅ Signal fired → {final_sym} {final_action} Score:{final_score}/5")
-
+ 
 # ─── Background Scanner Thread ─────────────────────────────────────────────────
 def scanner_loop():
     time.sleep(60)  # Initial delay — let server start
@@ -1109,7 +1109,7 @@ def scanner_loop():
         except Exception as e:
             print(f"[SCANNER ERROR] {e}")
         time.sleep(30 * 60)  # 30-minute cycle
-
+ 
 # ─── Self-Ping Thread — keeps Render free tier awake 24/7 ─────────────────────
 def self_ping_loop():
     """Pings own /ping endpoint every 10 minutes — prevents Render sleep"""
@@ -1127,10 +1127,10 @@ def self_ping_loop():
         except Exception as e:
             print(f"[PING] ⚠️  Self-ping failed: {e}")
         time.sleep(10 * 60)  # Every 10 minutes
-
+ 
 threading.Thread(target=scanner_loop,   daemon=True).start()
 threading.Thread(target=self_ping_loop, daemon=True).start()
-
+ 
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
