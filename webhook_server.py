@@ -1,15 +1,12 @@
-""" 
-Claude-Market Webhook Server v7.4
+"""
+Claude-Market Webhook Server v7.5
 Lukas Ferreira - Pretoria ZA
-MCAPI ENGINE 1 ENHANCED — REGIME DIRECTION GATE
-v7.4: Layer 1 Enhanced — regime direction gate added to scanner
-      No symbol BUYs in BEARISH regime (key fix: BTCUSD losses)
-      No symbol SELLs in BULLISH regime
-      NEUTRAL regime → both BUY and SELL allowed (mean reversion)
-      Per-symbol: GOLD can be BULLISH while BTCUSD is BEARISH
-      Scanner tries alternatives if first pick is regime-blocked
-      /regime endpoint now includes regime_check results
-      Pure webhook change — no EA update required
+MCAPI ENGINE 1 ENHANCED + PERSISTENT DATABASE
+v7.5: PostgreSQL database added — trade history survives every deploy
+      Closed trades saved to DB on arrival — loaded back on startup
+      Deleted tickets stored in DB — never reappear after restart
+      Layer 1 Enhanced regime gate active
+      No EA update required
 Model: claude-sonnet-4-6
 """
 
@@ -21,9 +18,142 @@ import json
 import urllib.request
 from datetime import datetime, timedelta
 import os
+try:
+    import psycopg2
+    import psycopg2.extras
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
+    print("[DB] psycopg2 not installed — add psycopg2-binary to requirements.txt")
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DATABASE — Persistent Trade History
+# Uses Render free PostgreSQL. Survives every deploy and restart.
+# URL stored in environment variable DATABASE_URL — never hardcoded.
+# ══════════════════════════════════════════════════════════════════════════════
+DB_URL = os.environ.get("DATABASE_URL", "")
+
+def _db_connect():
+    """Open a database connection. Returns None if DB not configured."""
+    if not DB_URL or not PSYCOPG2_AVAILABLE:
+        return None
+    try:
+        return psycopg2.connect(DB_URL)
+    except Exception as e:
+        print(f"[DB] Connection failed: {e}")
+        return None
+
+def init_db():
+    """Create tables on startup if they don't exist."""
+    conn = _db_connect()
+    if not conn:
+        print("[DB] No database — trade history stored in memory only (lost on restart)")
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS trade_history (
+                ticket      TEXT PRIMARY KEY,
+                symbol      TEXT,
+                trade_type  TEXT,
+                profit      REAL,
+                data        TEXT,
+                received_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS deleted_tickets (
+                ticket      TEXT PRIMARY KEY,
+                deleted_at  TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("[DB] ✅ Tables ready — trade_history + deleted_tickets")
+    except Exception as e:
+        print(f"[DB] Init error: {e}")
+
+def load_trades_from_db():
+    """Load all persisted trades into memory on startup."""
+    global trade_history, deleted_tickets
+    conn = _db_connect()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        # Load deleted tickets first
+        cur.execute("SELECT ticket FROM deleted_tickets")
+        deleted_tickets = {row[0] for row in cur.fetchall()}
+        print(f"[DB] Loaded {len(deleted_tickets)} deleted ticket(s)")
+        # Load trade history — skip deleted
+        cur.execute("""
+            SELECT data FROM trade_history
+            WHERE ticket NOT IN (SELECT ticket FROM deleted_tickets)
+            ORDER BY received_at DESC LIMIT 200
+        """)
+        rows = cur.fetchall()
+        trade_history = []
+        for row in rows:
+            try:
+                trade_history.append(json.loads(row[0]))
+            except Exception:
+                pass
+        cur.close()
+        conn.close()
+        print(f"[DB] ✅ Loaded {len(trade_history)} trade(s) from database")
+    except Exception as e:
+        print(f"[DB] Load error: {e}")
+
+def db_save_trade(trade):
+    """Persist a single closed trade to database."""
+    conn = _db_connect()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO trade_history (ticket, symbol, trade_type, profit, data)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (ticket) DO UPDATE SET
+                profit = EXCLUDED.profit,
+                data   = EXCLUDED.data
+        """, (
+            str(trade.get("ticket", "")),
+            trade.get("symbol", ""),
+            trade.get("type", ""),
+            float(trade.get("profit", 0)),
+            json.dumps(trade)
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[DB] Save trade error: {e}")
+
+def db_delete_trade(ticket):
+    """Mark a ticket as deleted so it never reappears after restart."""
+    conn = _db_connect()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO deleted_tickets (ticket) VALUES (%s) ON CONFLICT DO NOTHING",
+            (str(ticket),)
+        )
+        cur.execute(
+            "DELETE FROM trade_history WHERE ticket = %s",
+            (str(ticket),)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[DB] Delete trade error: {e}")
 
 # ─── CORS — allow Command Centre to fetch from any origin ─────────────────────
 @app.after_request
@@ -335,7 +465,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "7.4",
+        "version": "7.5",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -489,6 +619,7 @@ def post_history():
             source = data.get("source", "EA")
             symbol = data.get("symbol", "?")
             profit = data.get("profit", 0)
+            db_save_trade(data)  # ← persist to database
             print(f"[HISTORY] Received closed trade: {symbol} ${profit:.2f} [{source}]")
         return jsonify({"ok": True})
     except Exception as e:
@@ -504,10 +635,11 @@ def delete_history():
         ticket = str(data.get("ticket", ""))
         removed = 0
         if ticket:
-            deleted_tickets.add(ticket)           # v5.5: block EA from re-posting
+            deleted_tickets.add(ticket)
             before = len(trade_history)
             trade_history = [t for t in trade_history if str(t.get("ticket", "")) != ticket]
             removed = before - len(trade_history)
+            db_delete_trade(ticket)  # ← remove from database permanently
             print(f"[HISTORY] Deleted ticket {ticket} ({removed} record(s) removed, {len(deleted_tickets)} total blocked)")
         return jsonify({"ok": True, "removed": removed})
     except Exception as e:
@@ -1308,6 +1440,10 @@ def self_ping_loop():
 
 threading.Thread(target=scanner_loop,   daemon=True).start()
 threading.Thread(target=self_ping_loop, daemon=True).start()
+
+# ─── Database startup — load persisted trades ──────────────────────────────────
+init_db()
+load_trades_from_db()
 
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
