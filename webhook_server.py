@@ -1,5 +1,5 @@
 """
-Claude-Market Webhook Server v7.0
+Claude-Market Webhook Server v7.0 
 Lukas Ferreira - Pretoria ZA
 MCAPI ENGINE 4 — ASSET PERSONALITY
 v7.0: Per-symbol personality config
