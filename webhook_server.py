@@ -56,6 +56,55 @@ scan_results     = {             # Scanner intelligence data
 recently_traded  = {}  # {symbol: datetime} — 6-hour expiry rotation guard
 scan_lock        = threading.Lock()
 symbol_regimes   = {}  # Engine 1: {symbol: "BULLISH"/"NEUTRAL"/"BEARISH"}
+bb_data          = {}  # Engine 6: {symbol: {upper,middle,lower,price,location,range}}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MCAPI ENGINE 6 — STRUCTURE: Location Check
+# Before any signal fires, check if price is at the RIGHT level on BB
+# Data comes from EA's /status POST (GetBBData function in EA v8.9)
+# ══════════════════════════════════════════════════════════════════════════════
+def _check_structure(symbol, action):
+    """
+    Engine 6: Is price at the right Bollinger Band location to enter?
+    BUY:  price must be in lower zone (near lower BB)
+    SELL: price must be in upper zone (near upper BB)
+    Returns (allowed, reason)
+    """
+    data = bb_data.get(symbol.upper())
+    if not data or not data.get("range"):
+        return True, f"ENGINE6 SKIP: No BB data for {symbol} — check passes"
+
+    location = float(data.get("location", 0.5))  # 0=lower, 0.5=mid, 1=upper
+    price    = float(data.get("price", 0))
+    upper    = float(data.get("upper", 0))
+    lower    = float(data.get("lower", 0))
+    middle   = float(data.get("middle", 0))
+    bb_range = float(data.get("range", 0))
+
+    p    = _get_personality(symbol)
+    zone = p.get("location_zone", 0.33)
+
+    if action == "BUY":
+        if location <= zone:
+            return True, (f"ENGINE6 ✅ GOOD LOCATION: {symbol} at {location:.1%} of BB range "
+                         f"(lower {zone:.0%} zone) Price:{price:.2f} LowerBB:{lower:.2f}")
+        else:
+            pct_from_lower = (price - lower) / bb_range * 100
+            return False, (f"ENGINE6 ❌ POOR LOCATION: {symbol} BUY at {location:.1%} "
+                          f"({pct_from_lower:.0f}% from lower BB) — need ≤{zone:.0%} zone. "
+                          f"Wait for price near {lower:.2f}")
+
+    elif action == "SELL":
+        if location >= (1.0 - zone):
+            return True, (f"ENGINE6 ✅ GOOD LOCATION: {symbol} at {location:.1%} of BB range "
+                         f"(upper {zone:.0%} zone) Price:{price:.2f} UpperBB:{upper:.2f}")
+        else:
+            pct_from_upper = (upper - price) / bb_range * 100
+            return False, (f"ENGINE6 ❌ POOR LOCATION: {symbol} SELL at {location:.1%} "
+                          f"({pct_from_upper:.0f}% from upper BB) — need ≥{(1-zone):.0%} zone. "
+                          f"Wait for price near {upper:.2f}")
+
+    return True, "ENGINE6: Unknown action — check passes"
 
 # ─── Asset Universe — Ava broker symbol names ─────────────────────────────────
 ASSET_GROUPS = {
@@ -285,7 +334,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "7.0",
+        "version": "7.1",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -376,20 +425,31 @@ def get_signal():
 # ─── EA Status Receiver ────────────────────────────────────────────────────────
 @app.route("/status", methods=["POST"])
 def receive_status():
-    global mt5_status, trade_history, symbol_regimes
+    global mt5_status, trade_history, symbol_regimes, bb_data
     try:
         data = request.get_json(force=True)
         mt5_status = data
         mt5_status["received_at"] = datetime.utcnow().isoformat()
 
-        # v6.6 Engine 1: Read REAL regime from EA (EMA50/200 + ADX14 calculated in MQL5)
+        # Engine 1: Read regime from EA
         ea_sym    = str(data.get("symbol","")).strip().upper()
         ea_regime = str(data.get("regime","NEUTRAL")).upper().strip()
         if ea_sym and ea_regime in ["BULLISH","BEARISH","NEUTRAL"]:
-            if symbol_regimes.get(ea_sym) != ea_regime:  # Only log on change
+            if symbol_regimes.get(ea_sym) != ea_regime:
                 print(f"[REGIME] {ea_sym} = {ea_regime} (EA: EMA50/200+ADX14 H1)")
             symbol_regimes[ea_sym] = ea_regime
             scan_results["regimes"] = dict(symbol_regimes)
+
+        # Engine 6: Store BB data from EA v8.9
+        ea_bb = data.get("bb_data", {})
+        for sym, bbd in ea_bb.items():
+            if isinstance(bbd, dict) and bbd.get("range", 0) > 0:
+                bb_data[sym.upper()] = bbd
+                loc = bbd.get("location", 0.5)
+                print(f"[ENGINE6] BB data: {sym} location={loc:.1%} "
+                      f"upper={bbd.get('upper',0):.2f} "
+                      f"lower={bbd.get('lower',0):.2f} "
+                      f"price={bbd.get('price',0):.2f}")
 
         # Extract closed trades if EA sends them
         for t in data.get("closed_trades", []):
@@ -584,7 +644,17 @@ def update_personality():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-def ping():
+@app.route("/structure", methods=["GET"])
+def get_structure():
+    """ENGINE 6: Return current BB data and last structure check"""
+    return jsonify({
+        "bb_data":        bb_data,
+        "last_check":     scan_results.get("structure", {}),
+        "symbols_with_bb": list(bb_data.keys()),
+        "timestamp":      datetime.utcnow().isoformat()
+    })
+
+
     """Self-ping endpoint — keeps Render awake 24/7"""
     return jsonify({
         "alive": True,
@@ -1075,6 +1145,39 @@ def run_scanner():
             print(f"[ENGINE4] Using best available: {final_sym} Score:{final_score}")
 
         print(f"[ENGINE4] Final pick: {final_sym} {final_action} Score:{final_score}/5")
+
+        # ── Step 5: ENGINE 6 — Structure Check ───────────────────────────────
+        # Is price at the RIGHT LOCATION on the Bollinger Bands?
+        # Only applies to symbols with BB data (5 charted symbols)
+        struct_ok, struct_reason = _check_structure(final_sym, final_action)
+        print(f"[ENGINE6] {struct_reason}")
+        scan_results["structure"] = {
+            "symbol": final_sym, "action": final_action,
+            "passed": struct_ok, "reason": struct_reason,
+            "bb_data": bb_data.get(final_sym.upper(), {})
+        }
+
+        if not struct_ok:
+            # Try next candidate with BB data before giving up
+            print(f"[ENGINE6] {final_sym} blocked by structure — trying alternatives...")
+            struct_override = False
+            for alt_sym in candidates_to_try[:5]:
+                if alt_sym == final_sym:
+                    continue
+                alt_ok, alt_reason = _check_structure(alt_sym, final_action)
+                if alt_ok:
+                    print(f"[ENGINE6] Alternative found: {alt_sym} — {alt_reason}")
+                    final_sym = alt_sym
+                    struct_override = True
+                    break
+            if not struct_override:
+                # No good location found — check if BB data exists at all
+                has_bb = any(bb_data.get(s.upper()) for s in candidates_to_try[:5])
+                if has_bb:
+                    print(f"[ENGINE6] All candidates at poor location — signal blocked")
+                    return  # Wait for next scan when price may be better
+                else:
+                    print(f"[ENGINE6] No BB data available — structure check skipped")
 
         scan_results["global_winner"] = {
             "symbol": final_sym, "action": final_action, "score": final_score,
