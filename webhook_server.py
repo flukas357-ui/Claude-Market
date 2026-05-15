@@ -1,4 +1,3 @@
-
 """
 Claude-Market Webhook Server v7.6
 Lukas Ferreira - Pretoria ZA
@@ -822,6 +821,87 @@ def get_risk():
         "timestamp":             datetime.utcnow().isoformat(),
     })
 
+# ══════════════════════════════════════════════════════════════════════════════
+# /live — MISSION CONTROL FEED
+# Single endpoint that returns everything the Mission Control screen needs.
+# Polled every 3 seconds by the Mission Control dashboard.
+# Multi-account: each account's EA sends its account number in status POST.
+# ══════════════════════════════════════════════════════════════════════════════
+@app.route("/live", methods=["GET"])
+def get_live():
+    """Mission Control: full system state in one call"""
+    _e7_check_session_reset()
+
+    # Build engine status summary
+    engines = {
+        "E1": {"name": "Regime",      "status": "PARTIAL" if not symbol_regimes else "LIVE",
+               "detail": f"{len(symbol_regimes)} symbols classified"},
+        "E2": {"name": "Session",     "status": "LIVE",    "detail": "market hours active"},
+        "E4": {"name": "Personality", "status": "LIVE",    "detail": "6 symbols | AUDUSD blocked"},
+        "E6": {"name": "Structure",   "status": "LIVE"    if bb_data else "WAITING",
+               "detail": f"BB data: {len(bb_data)} symbols"},
+        "E7": {"name": "Risk",        "status": "LIVE",
+               "detail": f"drawdown {e7_risk['portfolio_drawdown_pct']:.1f}%"},
+        "E3": {"name": "Calendar",    "status": "PLANNED", "detail": "news filter — next sprint"},
+        "E9": {"name": "Memory",      "status": "PLANNED", "detail": "win rate scoring"},
+        "E10":{"name": "Forensics",   "status": "PLANNED", "detail": "trade autopsy"},
+    }
+
+    # Last signal pipeline steps (from scan_results)
+    pipeline_steps = []
+    if scan_results.get("global_winner"):
+        w = scan_results["global_winner"]
+        pipeline_steps = [
+            {"step": "Scanner",   "result": "PASS", "detail": f"picked {w.get('symbol','?')} {w.get('action','?')}"},
+            {"step": "E1 Regime", "result": "PASS", "detail": symbol_regimes.get(w.get('symbol',''), 'NEUTRAL')},
+            {"step": "E4 Engine", "result": "PASS", "detail": f"score {w.get('score','?')}/5"},
+            {"step": "E6 Structure","result": scan_results.get("structure",{}).get("passed",True) and "PASS" or "FAIL",
+             "detail": scan_results.get("structure",{}).get("reason","")[:60]},
+            {"step": "E7 Risk",   "result": "PASS" if not e7_risk["portfolio_paused"] else "FAIL",
+             "detail": f"drawdown {e7_risk['portfolio_drawdown_pct']:.1f}%"},
+            {"step": "Signal",    "result": "FIRED", "detail": f"{w.get('symbol','?')} {w.get('action','?')} → EA"},
+        ]
+    elif scan_results.get("last_run"):
+        pipeline_steps = [{"step": "Scanner", "result": "COMPLETE", "detail": "no signal this scan"}]
+
+    # Account data from latest EA status
+    acct = {
+        "balance":    mt5_status.get("balance"),
+        "equity":     mt5_status.get("equity"),
+        "margin":     mt5_status.get("margin"),
+        "free_margin":mt5_status.get("free_margin"),
+        "daily_pnl":  mt5_status.get("daily_pnl"),
+        "account_no": mt5_status.get("account"),
+        "connected":  bool(mt5_status.get("timestamp")),
+        "positions":  mt5_status.get("positions", []),
+    }
+
+    return jsonify({
+        "version":        "7.6",
+        "timestamp":      datetime.utcnow().isoformat(),
+        "trading_enabled":trading_enabled,
+        "pending_signal": pending_signal is not None,
+        "last_scan":      scan_results.get("last_run"),
+        "next_scan":      scan_results.get("next_run"),
+        "last_winner":    scan_results.get("global_winner"),
+        "pipeline_steps": pipeline_steps,
+        "engines":        engines,
+        "bb_live":        bb_data,
+        "regimes":        symbol_regimes,
+        "risk":           {
+            "drawdown_pct":       e7_risk["portfolio_drawdown_pct"],
+            "portfolio_paused":   e7_risk["portfolio_paused"],
+            "session_start":      e7_risk["session_start_equity"],
+            "current_equity":     e7_risk["current_equity"],
+            "symbol_session_losses": e7_risk["symbol_session_losses"],
+            "symbol_paused":      e7_risk["symbol_paused"],
+            "limits":             e7_risk["limits"],
+        },
+        "account":        acct,
+        "trade_count":    len(trade_history),
+        "recent_trades":  trade_history[:5],
+    })
+
 # ─── Keep-alive ping endpoint ─────────────────────────────────────────────────
 @app.route("/regime", methods=["GET"])
 def get_regimes():
@@ -1613,3 +1693,4 @@ if __name__ == "__main__":
     print(f"Claude-Market Webhook Server v6.9 — Engine 1 + Engine 2 SESSION FILTER — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
+
