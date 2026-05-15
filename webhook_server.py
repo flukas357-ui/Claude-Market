@@ -1,13 +1,14 @@
 """
-Claude-Market Webhook Server v6.9
+Claude-Market Webhook Server v7.0
 Lukas Ferreira - Pretoria ZA
-MCAPI Engine 2 (mini) — Session Intelligence
-v6.9: Market hours filter in scanner Stage 1
-      Closed assets excluded before scanning starts
-      No more NAS100 signals when US market is closed
-      Crypto 24/7 | US indices 14:30-21:00 UTC | EU 07:00-15:30
-      Forex/metals Mon-Fri 00:00-22:00 UTC
-      /session endpoint shows live open/closed per symbol
+MCAPI ENGINE 4 — ASSET PERSONALITY
+v7.0: Per-symbol personality config
+      AUDUSD blacklisted (Sprint 0: 0% win rate, -$526)
+      USDZAR top priority (Sprint 0: 100% win rate, +$339)
+      Per-symbol: min_score, sessions, max_daily, sl/tp/trail settings
+      Scanner sorts by priority before picking
+      /personality GET endpoint for Command Centre
+      /personality/update POST endpoint for live config changes
 Model: claude-sonnet-4-6
 """
 
@@ -65,6 +66,219 @@ ASSET_GROUPS = {
     "Crypto":        ["BTCUSD","ETHUSD"],
     "SA & Emerging": ["USDZAR","EURZAR","GBPZAR"]
 }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MCAPI ENGINE 4 — ASSET PERSONALITY
+# Per-symbol settings that override global defaults
+# Based on Sprint 0 data + market knowledge
+# ══════════════════════════════════════════════════════════════════════════════
+PERSONALITY = {
+    # ── COMMODITIES ────────────────────────────────────────────────────────────
+    "GOLD": {
+        "blacklist":      False,
+        "priority":       2,          # High — consistent performer
+        "min_score":      3,
+        "sessions":       ["London","New York"],
+        "max_daily":      3,
+        "sl_points":      25,
+        "tp_ratio":       1.5,
+        "trail_pct":      15,
+        "location_zone":  0.33,       # Layer 6: lower/upper 33% of BB
+        "notes":          "Tight SL. London/NY hours only. Good range trader."
+    },
+    "SILVER": {
+        "blacklist":      False,
+        "priority":       1,
+        "min_score":      3,
+        "sessions":       ["London","New York"],
+        "max_daily":      2,
+        "sl_points":      2.5,
+        "tp_ratio":       1.5,
+        "trail_pct":      15,
+        "location_zone":  0.33,
+        "notes":          "Volatile. Max 2/day. Needs structure check."
+    },
+
+    # ── CRYPTO ─────────────────────────────────────────────────────────────────
+    "BTCUSD": {
+        "blacklist":      False,
+        "priority":       1,
+        "min_score":      4,          # Higher bar — volatile, direction-sensitive
+        "sessions":       ["New York"],
+        "max_daily":      1,          # ONE BTC trade per day max
+        "sl_points":      500,
+        "tp_ratio":       2.0,        # Wider TP to match large SL
+        "trail_pct":      10,         # Activate trail faster (10% not 20%)
+        "location_zone":  0.25,       # Stricter location — outer 25% only
+        "notes":          "Sprint 0: always hit SL. Regime check critical. One shot per day."
+    },
+    "ETHUSD": {
+        "blacklist":      False,
+        "priority":       1,
+        "min_score":      3,
+        "sessions":       ["New York"],
+        "max_daily":      2,
+        "sl_points":      30,
+        "tp_ratio":       1.5,
+        "trail_pct":      15,
+        "location_zone":  0.33,
+        "notes":          "Less volatile than BTC. Follows BTC direction."
+    },
+
+    # ── FOREX MAJORS ───────────────────────────────────────────────────────────
+    "EURUSD": {
+        "blacklist":      False,
+        "priority":       1,
+        "min_score":      4,          # Sprint 0: 0/1. Higher bar.
+        "sessions":       ["London","New York"],
+        "max_daily":      2,
+        "sl_points":      30,
+        "tp_ratio":       1.5,
+        "trail_pct":      20,
+        "location_zone":  0.33,
+        "notes":          "Tight range. Needs strong session alignment."
+    },
+    "GBPUSD": {
+        "blacklist":      False,
+        "priority":       2,          # Sprint 0: current trade +$135, L3 trail active
+        "min_score":      3,
+        "sessions":       ["London","New York"],
+        "max_daily":      2,
+        "sl_points":      35,
+        "tp_ratio":       1.5,
+        "trail_pct":      20,
+        "location_zone":  0.33,
+        "notes":          "Volatile during London. Good BB range trader."
+    },
+    "USDJPY": {
+        "blacklist":      False,
+        "priority":       2,          # Sprint 0: +$40, Asian hours performer
+        "min_score":      3,
+        "sessions":       ["Asian","London"],
+        "max_daily":      2,
+        "sl_points":      35,
+        "tp_ratio":       1.5,
+        "trail_pct":      20,
+        "location_zone":  0.35,
+        "notes":          "Asian session specialist. Trends well."
+    },
+    "AUDUSD": {
+        "blacklist":      True,        # ← BLOCKED: Sprint 0: 0% win rate, -$526
+        "blacklist_reason": "Sprint 0: 0/3 wins, -$526 total loss",
+        "blacklist_review": "2026-06-01",   # Review date — may unblock after Layer 6 live
+        "priority":       0,
+        "min_score":      5,          # Effectively impossible
+        "notes":          "Consistent loser Sprint 0. Re-evaluate after Structure Engine live."
+    },
+    "USDCAD": {
+        "blacklist":      False,
+        "priority":       1,
+        "min_score":      3,
+        "sessions":       ["New York"],
+        "max_daily":      2,
+        "trail_pct":      20,
+        "location_zone":  0.33,
+        "notes":          "Oil-correlated. NY session only."
+    },
+
+    # ── SA & EMERGING ──────────────────────────────────────────────────────────
+    "USDZAR": {
+        "blacklist":      False,
+        "priority":       3,          # ← TOP PRIORITY: Sprint 0: 3/3 wins, +$339
+        "min_score":      3,
+        "sessions":       ["London","New York","Asian"],  # All sessions
+        "max_daily":      4,
+        "sl_points":      63,
+        "tp_ratio":       1.5,
+        "trail_pct":      15,
+        "location_zone":  0.40,       # Slightly more tolerant — trends well
+        "notes":          "Sprint 0 STAR: 100% win rate, +$339. Prioritise always."
+    },
+    "GBPJPY": {
+        "blacklist":      False,
+        "priority":       1,
+        "min_score":      3,
+        "sessions":       ["London","Asian"],
+        "max_daily":      2,
+        "trail_pct":      15,
+        "location_zone":  0.30,
+        "notes":          "High volatility. Tight location required."
+    },
+    "AUDJPY": {
+        "blacklist":      False,
+        "priority":       1,
+        "min_score":      3,
+        "sessions":       ["Asian","London"],
+        "max_daily":      2,
+        "trail_pct":      20,
+        "location_zone":  0.33,
+        "notes":          "Asian session. Commodity currency."
+    },
+}
+
+# Daily trade counter — resets at midnight UTC
+_daily_trades = {}   # {symbol: count}
+_daily_date   = None # Date string for reset check
+
+def _get_personality(symbol):
+    """Get personality config for a symbol with safe defaults"""
+    return PERSONALITY.get(symbol, {
+        "blacklist":     False,
+        "priority":      1,
+        "min_score":     3,
+        "sessions":      ["London","New York","Asian"],
+        "max_daily":     3,
+        "trail_pct":     20,
+        "location_zone": 0.33,
+        "notes":         "Default personality — no custom config"
+    })
+
+def _personality_check(symbol, action, session):
+    """
+    ENGINE 4: Personality gate — returns (allowed, reason)
+    Checks: blacklist / session / daily limit / min_score threshold
+    """
+    global _daily_trades, _daily_date
+
+    p = _get_personality(symbol)
+
+    # Reset daily counter at midnight UTC
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    if _daily_date != today:
+        _daily_trades = {}
+        _daily_date   = today
+
+    # 1. Blacklist check
+    if p.get("blacklist", False):
+        reason = p.get("blacklist_reason", "Blacklisted")
+        return False, f"BLACKLISTED: {reason}"
+
+    # 2. Session check
+    allowed_sessions = p.get("sessions", ["London","New York","Asian"])
+    if session not in allowed_sessions:
+        return False, f"WRONG SESSION: {symbol} runs in {allowed_sessions}, not {session}"
+
+    # 3. Daily trade limit
+    daily_count = _daily_trades.get(symbol, 0)
+    max_daily   = p.get("max_daily", 3)
+    if daily_count >= max_daily:
+        return False, f"DAILY LIMIT: {symbol} already traded {daily_count}/{max_daily} times today"
+
+    return True, f"PERSONALITY OK: priority={p.get('priority',1)}, session={session}"
+
+def _personality_min_score(symbol):
+    """Get per-symbol minimum score threshold"""
+    return _get_personality(symbol).get("min_score", 3)
+
+def _personality_priority(symbol):
+    """Get scanner priority (higher = picked first)"""
+    return _get_personality(symbol).get("priority", 1)
+
+def _personality_record_trade(symbol):
+    """Record that a trade was fired for this symbol today"""
+    global _daily_trades
+    _daily_trades[symbol] = _daily_trades.get(symbol, 0) + 1
+    print(f"[ENGINE4] {symbol} daily count: {_daily_trades[symbol]}")
 
 # ─── Health Check ─────────────────────────────────────────────────────────────
 @app.route("/", methods=["GET"])
@@ -325,6 +539,50 @@ def clear_rotation():
     print(f"[ROTATION] Manual clear — removed: {cleared}")
     return jsonify({"ok": True, "cleared": cleared,
                     "message": "All symbols available again ✅"})
+
+@app.route("/personality", methods=["GET"])
+def get_personality():
+    """ENGINE 4: Return all symbol personalities + today's trade counts"""
+    utc_hour = datetime.utcnow().hour
+    session  = "London" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian"
+    result   = {}
+    for sym, cfg in PERSONALITY.items():
+        result[sym] = {
+            **cfg,
+            "daily_count":  _daily_trades.get(sym, 0),
+            "daily_remaining": max(0, cfg.get("max_daily", 3) - _daily_trades.get(sym, 0)),
+            "session_open": session in cfg.get("sessions", [session]),
+            "current_session": session
+        }
+    # Add defaults for symbols not in PERSONALITY
+    return jsonify({
+        "personalities": result,
+        "session":       session,
+        "daily_date":    _daily_date,
+        "blacklisted":   [s for s, c in PERSONALITY.items() if c.get("blacklist")],
+        "top_priority":  [s for s, c in PERSONALITY.items()
+                          if c.get("priority", 1) >= 3 and not c.get("blacklist")],
+        "timestamp":     datetime.utcnow().isoformat()
+    })
+
+@app.route("/personality/update", methods=["POST"])
+def update_personality():
+    """ENGINE 4: Update a symbol's personality settings from Command Centre"""
+    try:
+        data   = request.get_json(force=True)
+        secret = data.get("secret","")
+        if secret != "claude-market-2026":
+            return jsonify({"error": "Invalid secret"}), 401
+        symbol  = str(data.get("symbol","")).upper().strip()
+        updates = data.get("settings", {})
+        if not symbol or symbol not in PERSONALITY:
+            return jsonify({"error": f"Unknown symbol: {symbol}"}), 400
+        PERSONALITY[symbol].update(updates)
+        print(f"[ENGINE4] {symbol} personality updated: {updates}")
+        return jsonify({"ok": True, "symbol": symbol,
+                        "personality": PERSONALITY[symbol]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 def ping():
     """Self-ping endpoint — keeps Render awake 24/7"""
@@ -697,39 +955,72 @@ def run_scanner():
             print(f"[ROTATION] {s} expired — available again")
         print(f"[ROTATION] Blocked: {list(recently_traded.keys())}")
 
-        # ── Step 2: Build available symbol list ───────────────────────────────
+        # ── Step 2: Build available symbol list with ENGINE 4 filter ─────────────
         open_syms = {str(p.get("symbol","")).upper()
                      for p in mt5_status.get("positions",[])}
 
-        # Priority symbols — best liquidity and Ava-supported
+        utc_hour = datetime.utcnow().hour
+        session  = "London" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian"
+
+        # Base symbol list — all non-blacklisted
         all_syms = ["GOLD","SILVER","BTCUSD","ETHUSD","EURUSD",
-                    "GBPUSD","USDJPY","USDZAR","GBPJPY","AUDUSD"]
+                    "GBPUSD","USDJPY","USDZAR","GBPJPY","AUDUSD","USDCAD","AUDJPY"]
 
-        available = [s for s in all_syms
-                     if s not in recently_traded
-                     and s not in open_syms
-                     and is_asset_open(s)]
+        # Engine 4: Filter using personality
+        available = []
+        blocked_log = []
+        for s in all_syms:
+            if s in recently_traded:
+                blocked_log.append(f"{s}(rotation)")
+                continue
+            if s in open_syms:
+                blocked_log.append(f"{s}(open)")
+                continue
+            if not is_asset_open(s):
+                blocked_log.append(f"{s}(closed)")
+                continue
+            allowed, reason = _personality_check(s, "BUY", session)
+            if not allowed:
+                blocked_log.append(f"{s}({reason.split(':')[0]})")
+                continue
+            available.append(s)
 
-        print(f"[SCANNER] Available: {available} | Open: {list(open_syms)}")
+        # Engine 4: Sort by personality priority (highest first)
+        available.sort(key=lambda s: _personality_priority(s), reverse=True)
+
+        print(f"[ENGINE4] Session: {session}")
+        print(f"[ENGINE4] Available (priority sorted): {available}")
+        print(f"[ENGINE4] Blocked: {blocked_log}")
 
         if not available:
-            print("[SCANNER] No available symbols — all blocked or market closed")
+            print("[SCANNER] No available symbols after Engine 4 filter")
             scan_results["global_winner"] = None
             return
 
-        # ── Step 3: Claude picks best symbol and direction ────────────────────
-        sym    = available[0]   # Default fallback
+        # ── Step 3: Claude picks best symbol (personality-aware) ─────────────
+        sym    = available[0]   # Default = highest priority symbol
         action = "BUY"
         try:
-            utc_hour = datetime.utcnow().hour
-            session  = "London" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian"
+            # Build priority hints for Claude
+            priority_hints = []
+            for s in available[:6]:
+                p = _get_personality(s)
+                hint = f"{s}(priority={p.get('priority',1)}"
+                if p.get('priority',1) >= 3:
+                    hint += ",TOP_PICK"
+                hint += ")"
+                priority_hints.append(hint)
+
             resp = client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=80,
                 messages=[{
                     "role": "user",
                     "content": (
-                        f"Session: {session} UTC. Pick the best trade from: {', '.join(available)}.\n"
+                        f"Session: {session} UTC. "
+                        f"Pick the BEST trade from: {', '.join(priority_hints)}.\n"
+                        f"Higher priority = stronger historical performance. "
+                        f"TOP_PICK symbols are proven performers.\n"
                         f"Reply ONLY with JSON: {{\"symbol\":\"GOLD\",\"action\":\"BUY\"}}\n"
                         f"action must be BUY or SELL. symbol must be from the list. JSON only."
                     )
@@ -744,9 +1035,9 @@ def run_scanner():
                 act    = str(r.get("action","BUY")).upper().strip()
                 sym    = raw    if raw in available else available[0]
                 action = act    if act in ["BUY","SELL"] else "BUY"
-            print(f"[SCANNER] Claude picked: {sym} {action}")
+            print(f"[ENGINE4] Claude picked: {sym} {action}")
         except Exception as e:
-            print(f"[SCANNER] Claude pick error: {e} — using {sym} {action}")
+            print(f"[ENGINE4] Claude pick error: {e} — using {sym} {action}")
 
         # Update scan_results so Command Centre shows the pick
         scan_results["stage1"] = {g: [s for s in a if is_asset_open(s)][:3]
@@ -756,38 +1047,34 @@ def run_scanner():
                                                 "confidence": "MEDIUM", "signal_type": "BB_BREAKOUT",
                                                 "reason": f"Scanner pick — {datetime.utcnow().strftime('%H:%M')} UTC"}}
 
-        # ── Step 4: Validate — try all available until score ≥ 2 ──────────────
-        # EA Gate 1 (MinScore=3) is the final quality filter
-        # Scanner just needs to find ONE candidate worth sending
+        # ── Step 4: Validate — per-symbol min_score from Engine 4 ────────────
         final_sym    = None
         final_action = None
         final_score  = 0
 
-        # Try Claude's pick first, then others
         candidates_to_try = [sym] + [s for s in available if s != sym]
 
-        for try_sym in candidates_to_try[:5]:  # Try up to 5 symbols
+        for try_sym in candidates_to_try[:5]:
+            sym_min_score = _personality_min_score(try_sym)
             score = _claude_validate(try_sym, action, "0", "BB")
-            print(f"[SCANNER] {try_sym} {action} → Score:{score}/5")
-            if score >= 3:
+            print(f"[ENGINE4] {try_sym} {action} → Score:{score}/5 (need≥{sym_min_score})")
+            if score >= sym_min_score:
                 final_sym    = try_sym
                 final_action = action
                 final_score  = score
                 break
             elif score >= 2 and not final_sym:
-                # Keep as backup — only use if nothing scores 3+
                 final_sym    = try_sym
                 final_action = action
                 final_score  = score
 
         if not final_sym:
-            # Last resort — fire first available, EA Gate 1 decides
             final_sym    = available[0]
             final_action = action
             final_score  = _claude_validate(final_sym, final_action, "0", "BB")
-            print(f"[SCANNER] Using best available: {final_sym} Score:{final_score}")
+            print(f"[ENGINE4] Using best available: {final_sym} Score:{final_score}")
 
-        print(f"[SCANNER] Final pick: {final_sym} {final_action} Score:{final_score}/5")
+        print(f"[ENGINE4] Final pick: {final_sym} {final_action} Score:{final_score}/5")
 
         scan_results["global_winner"] = {
             "symbol": final_sym, "action": final_action, "score": final_score,
@@ -810,7 +1097,8 @@ def run_scanner():
             "timestamp":   datetime.utcnow().isoformat()
         }
         _add_to_history(final_sym, final_action, final_score, "BB")
-        print(f"[SCANNER] ✅ Signal fired → {final_sym} {final_action} Score:{final_score}/5")
+        _personality_record_trade(final_sym)
+        print(f"[ENGINE4] ✅ Signal fired → {final_sym} {final_action} Score:{final_score}/5")
 
 # ─── Background Scanner Thread ─────────────────────────────────────────────────
 def scanner_loop():
