@@ -1,15 +1,16 @@
 """
-Claude-Market Webhook Server v8.0
+Claude-Market Webhook Server v8.1
 Lukas Ferreira - Pretoria ZA
-MCAPI ENGINE 5 — VOLATILITY GATE
-v8.0: Engine 5 live — ATR volatility gate before every signal
-      EA v9.1 sends H1 ATR(14) per symbol in every status POST
-      Too volatile  (ATR > max%) → block — spike or news event
-      Too quiet     (ATR < min%) → block — dead market, spread too costly
-      Per-symbol thresholds — different limits for BTC vs EURUSD
-      Tries alternative symbols if primary is outside range
-      /volatility endpoint — live ATR status per symbol
-      Engine 1 Full active — 3-condition regime determines action
+MCAPI ENGINE 9 — MEMORY / WIN RATE BIAS
+v8.1: Engine 9 live — win rate memory per symbol per regime per session
+      Rebuilt from PostgreSQL trade history on every startup
+      +1 score: ≥75% win rate in this exact setup (symbol+regime+session)
+      -1 score: ≤40% win rate — Claude told to avoid if alternatives exist
+       0 score: neutral or not enough data yet (needs ≥3 trades)
+      Memory updates live on every closed trade posted by EA
+      /memory endpoint — full win rate breakdown per symbol
+      USDZAR 100% win rate → automatic priority boost
+      Scanner prompt now includes mem=+1 / mem=-1 per symbol
 """
 
 from flask import Flask, request, jsonify
@@ -199,6 +200,17 @@ bb_data          = {}  # Engine 6: {symbol: {upper,middle,lower,price,location,r
 # ATR evaluated as % of current price — works for all symbols and price levels
 # ══════════════════════════════════════════════════════════════════════════════
 volatility_data  = {}  # {symbol: {"atr": float, "atr_pct": float, "timestamp": str}}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE 9 — MEMORY
+# Tracks win rate per symbol per regime per session from trade history.
+# Adjusts scanner priority hints so proven setups are favoured.
+# Score: +1 (strong track record) · 0 (neutral) · -1 (struggling)
+# Requires ≥3 trades in a condition before scoring · fails open on sparse data
+# Rebuilt from PostgreSQL trade history on every startup.
+# ══════════════════════════════════════════════════════════════════════════════
+memory_data = {}
+# Structure: {SYMBOL: {REGIME: {SESSION: {wins,losses,total}}, overall: {wins,losses,total}}}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENGINE 3 — CALENDAR / NEWS FILTER
@@ -553,7 +565,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "8.0",
+        "version": "8.1",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -727,6 +739,18 @@ def post_history():
             profit = data.get("profit", 0)
             db_save_trade(data)
             _e7_record_close(symbol, float(profit))   # Engine 7 session tracking
+
+            # Engine 9: Update memory — infer session from close time, regime from direction
+            trade_type = str(data.get("type", "BUY")).upper()
+            stored_regime = str(data.get("regime", "")).upper()
+            regime  = stored_regime if stored_regime in ["BULLISH","BEARISH","NEUTRAL"] else (
+                symbol_regimes.get(symbol.upper(), "BULLISH" if trade_type == "BUY" else "BEARISH")
+            )
+            session = _infer_session(data.get("close_time") or data.get("received_at", ""))
+            _memory_update(symbol, regime, session, float(profit) > 0)
+            mem_score = _get_memory_score(symbol, regime, session)
+            print(f"[ENGINE9] Memory updated: {symbol} {regime} {session} "
+                  f"{'WIN' if float(profit)>0 else 'LOSS'} → score={mem_score:+d}")
             print(f"[HISTORY] Received closed trade: {symbol} ${profit:.2f} [{source}]")
         return jsonify({"ok": True})
     except Exception as e:
@@ -795,6 +819,142 @@ def manual_scan():
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE 9 HELPERS — Memory / Win Rate Bias
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _infer_session(timestamp_str: str) -> str:
+    """Determine trading session from a UTC timestamp string."""
+    try:
+        if "T" in timestamp_str:
+            h = int(timestamp_str.split("T")[1][:2])
+        elif " " in timestamp_str:
+            h = int(timestamp_str.split(" ")[1][:2])
+        else:
+            return "London"
+        if 8 <= h < 13:  return "London"
+        if 13 <= h < 21: return "New York"
+        return "Asian"
+    except:
+        return "London"
+
+
+def _memory_update(symbol: str, regime: str, session: str, won: bool):
+    """Add one trade result to memory_data."""
+    sym = symbol.upper()
+    if sym not in memory_data:
+        memory_data[sym] = {"overall": {"wins":0,"losses":0,"total":0}}
+    if regime not in memory_data[sym]:
+        memory_data[sym][regime] = {}
+    if session not in memory_data[sym][regime]:
+        memory_data[sym][regime][session] = {"wins":0,"losses":0,"total":0}
+
+    bucket = memory_data[sym][regime][session]
+    overall = memory_data[sym]["overall"]
+    if won:
+        bucket["wins"]   += 1
+        overall["wins"]  += 1
+    else:
+        bucket["losses"]  += 1
+        overall["losses"] += 1
+    bucket["total"]  += 1
+    overall["total"] += 1
+
+
+def _get_memory_score(symbol: str, regime: str, session: str) -> int:
+    """
+    Engine 9: Returns priority adjustment based on historical win rate.
+    +1 = strong track record in these conditions (≥75% win rate, ≥3 trades)
+     0 = neutral or insufficient data
+    -1 = poor track record (≤40% win rate, ≥3 trades)
+    """
+    sym  = symbol.upper()
+    data = memory_data.get(sym, {})
+
+    # Check specific condition (regime + session) — most specific data
+    cond = data.get(regime, {}).get(session, {})
+    if cond.get("total", 0) >= 3:
+        wr = cond["wins"] / cond["total"]
+        if wr >= 0.75: return +1
+        if wr <= 0.40: return -1
+        return 0
+
+    # Fall back to overall symbol win rate
+    overall = data.get("overall", {})
+    if overall.get("total", 0) >= 5:
+        wr = overall["wins"] / overall["total"]
+        if wr >= 0.75: return +1
+        if wr <= 0.40: return -1
+
+    return 0  # Not enough data yet — neutral
+
+
+def _rebuild_memory():
+    """
+    Rebuild memory_data from trade_history on startup.
+    Infers regime from trade direction (BUY → BULLISH, SELL → BEARISH).
+    Session inferred from open_time timestamp.
+    """
+    global memory_data
+    memory_data = {}
+    count = 0
+    for trade in trade_history:
+        sym    = str(trade.get("symbol", "")).upper()
+        profit = float(trade.get("profit", 0))
+        ttype  = str(trade.get("type", "BUY")).upper()
+        ot     = str(trade.get("open_time") or trade.get("timestamp") or "")
+        if not sym:
+            continue
+        # Infer regime from direction
+        stored_regime = str(trade.get("regime", "")).upper()
+        regime = stored_regime if stored_regime in ["BULLISH","BEARISH","NEUTRAL"] else (
+            "BULLISH" if ttype == "BUY" else "BEARISH"
+        )
+        session = _infer_session(ot)
+        _memory_update(sym, regime, session, profit > 0)
+        count += 1
+    print(f"[ENGINE9] Memory rebuilt from {count} trades — "
+          f"{len(memory_data)} symbols tracked")
+    for sym, data in memory_data.items():
+        ov = data.get("overall", {})
+        if ov.get("total", 0) > 0:
+            wr = ov["wins"] / ov["total"] * 100
+            print(f"[ENGINE9]   {sym}: {ov['wins']}/{ov['total']} = {wr:.0f}% win rate")
+
+
+@app.route("/memory", methods=["GET"])
+def get_memory():
+    """Engine 9: Win rate memory per symbol — Config Tab reads this"""
+    result = {}
+    for sym, data in memory_data.items():
+        ov = data.get("overall", {})
+        total = ov.get("total", 0)
+        win_rate = round(ov["wins"] / total * 100, 1) if total > 0 else 0
+        conditions = {}
+        for regime, sessions in data.items():
+            if regime == "overall":
+                continue
+            conditions[regime] = {}
+            for session, stats in sessions.items():
+                t = stats.get("total", 0)
+                wr = round(stats["wins"] / t * 100, 1) if t > 0 else 0
+                score = _get_memory_score(sym, regime, session)
+                conditions[regime][session] = {**stats, "win_rate_pct": wr, "memory_score": score}
+        result[sym] = {
+            "overall": {**ov, "win_rate_pct": win_rate},
+            "conditions": conditions,
+            "memory_score": _get_memory_score(sym,
+                symbol_regimes.get(sym, "NEUTRAL"),
+                "London")  # sample score for current regime
+        }
+    return jsonify({
+        "engine":    "9 — Memory",
+        "symbols":   result,
+        "total_trades_tracked": sum(d.get("overall",{}).get("total",0) for d in memory_data.values()),
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+
 # ENGINE 5 HELPERS — Volatility Gate
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1791,15 +1951,18 @@ def run_scanner():
         sym    = available[0]   # Default = highest priority symbol
         action = regime_actions.get(sym, "BUY")
         try:
-            # Build regime-aware priority hints for Claude
+            # Build regime-aware priority hints for Claude — Engine 9 memory score included
             priority_hints = []
             for s in available[:6]:
                 p = _get_personality(s)
                 r = symbol_regimes.get(s.upper(), "NEUTRAL")
                 a = regime_actions.get(s, "BUY")
+                mem = _get_memory_score(s, r, session)
                 hint = f"{s}(priority={p.get('priority',1)},regime={r},{a}"
                 if p.get('priority',1) >= 3:
                     hint += ",TOP_PICK"
+                if mem != 0:
+                    hint += f",mem={mem:+d}"  # +1 = proven setup, -1 = struggling
                 hint += ")"
                 priority_hints.append(hint)
 
@@ -1811,9 +1974,9 @@ def run_scanner():
                     "content": (
                         f"Session: {session} UTC. "
                         f"Pick the BEST symbol from: {', '.join(priority_hints)}.\n"
-                        f"Each entry shows: name(priority,regime,action). "
-                        f"TOP_PICK = proven performer. "
-                        f"Pick the symbol most likely to move in its regime direction.\n"
+                        f"Each entry shows: name(priority,regime,action,mem=score). "
+                        f"TOP_PICK = proven performer. mem=+1 = strong historical win rate in this setup. "
+                        f"mem=-1 = this setup has been struggling — avoid if alternatives exist.\n"
                         f"Reply ONLY with JSON: {{\"symbol\":\"GOLD\",\"action\":\"BUY\"}}\n"
                         f"Use EXACTLY the action shown for your chosen symbol. JSON only."
                     )
@@ -2052,6 +2215,7 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 # ─── Database startup — load persisted trades ──────────────────────────────────
 init_db()
 load_trades_from_db()
+_rebuild_memory()   # Engine 9: build win rate memory from trade history
 
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
