@@ -1,15 +1,15 @@
 """
-Claude-Market Webhook Server v7.8
+Claude-Market Webhook Server v7.9
 Lukas Ferreira - Pretoria ZA
-MCAPI ENGINE 3 — CALENDAR / NEWS FILTER
-v7.8: Engine 3 live — news event gate before every signal
-      Source: ForexFactory weekly calendar (free, no API key)
-      HIGH impact: blocks 30 min before + 15 min after
-      MEDIUM impact: blocks 15 min before only
-      Tries alternative symbols if primary is news-blocked
-      Never blocks on network error — passes through safely
-      /news endpoint — live upcoming events for Config Tab
-      8 symbols active — USDZAR GOLD SILVER BTC ETH NAS EURUSD US_500
+MCAPI ENGINE 1 FULL — 3-CONDITION REGIME
+v7.9: Engine 1 Full — BULLISH / RANGING / BEARISH per symbol
+      BULLISH  → BUY only  (trade with uptrend)
+      BEARISH  → SELL only (trade with downtrend — unlocks SELL signals)
+      RANGING  → BUY at lower band / SELL at upper band (mean reversion)
+      Regime determines action — not hardcoded BUY
+      Claude picks symbol — regime determines direction
+      All 8 engines now gate every signal
+      H4 confirmation — EA batch update (coming with Engine 5+8)
 """
 
 from flask import Flask, request, jsonify
@@ -544,7 +544,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "7.8",
+        "version": "7.9",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -1386,6 +1386,30 @@ def _regime_action(regime):
 # Data source: EA status POST → symbol_regimes dict (EMA50/200 + ADX H1)
 # Per-symbol: GOLD can be BULLISH while BTCUSD is BEARISH simultaneously
 # ══════════════════════════════════════════════════════════════════════════════
+def _get_regime_action(symbol: str) -> str:
+    """
+    ENGINE 1 FULL: Determine correct trade direction from regime + BB location.
+
+    BULLISH  → BUY  (trade with the uptrend — always)
+    BEARISH  → SELL (trade with the downtrend — always)
+    NEUTRAL  → direction from BB location:
+               lower 50% of band → BUY  (bouncing from lower band)
+               upper 50% of band → SELL (fading upper band)
+
+    This replaces the hardcoded action="BUY" in the scanner.
+    The result feeds into Claude's prompt so it knows the allowed direction.
+    """
+    regime = symbol_regimes.get(symbol.upper(), "NEUTRAL")
+    if regime == "BULLISH":
+        return "BUY"
+    if regime == "BEARISH":
+        return "SELL"
+    # NEUTRAL / RANGING — use BB location to determine mean-reversion direction
+    bb  = bb_data.get(symbol.upper(), {})
+    loc = float(bb.get("location", 0.5)) if bb else 0.5
+    return "BUY" if loc <= 0.50 else "SELL"
+
+
 def _check_regime_direction(symbol, action, regime):
     """
     Engine 1 Enhanced: Does the proposed action match the current regime?
@@ -1674,15 +1698,22 @@ def run_scanner():
             scan_results["global_winner"] = None
             return
 
-        # ── Step 3: Claude picks best symbol (personality-aware) ─────────────
+        # ── Step 3: ENGINE 1 FULL — Regime-aware action + Claude symbol pick ───
+        # Determine the correct action for EACH symbol based on its regime.
+        # BULLISH → BUY · BEARISH → SELL · NEUTRAL → BB location decides.
+        # Claude then picks the BEST symbol — but action is regime-determined.
+        regime_actions = {s: _get_regime_action(s) for s in available}
+
         sym    = available[0]   # Default = highest priority symbol
-        action = "BUY"
+        action = regime_actions.get(sym, "BUY")
         try:
-            # Build priority hints for Claude
+            # Build regime-aware priority hints for Claude
             priority_hints = []
             for s in available[:6]:
                 p = _get_personality(s)
-                hint = f"{s}(priority={p.get('priority',1)}"
+                r = symbol_regimes.get(s.upper(), "NEUTRAL")
+                a = regime_actions.get(s, "BUY")
+                hint = f"{s}(priority={p.get('priority',1)},regime={r},{a}"
                 if p.get('priority',1) >= 3:
                     hint += ",TOP_PICK"
                 hint += ")"
@@ -1695,11 +1726,12 @@ def run_scanner():
                     "role": "user",
                     "content": (
                         f"Session: {session} UTC. "
-                        f"Pick the BEST trade from: {', '.join(priority_hints)}.\n"
-                        f"Higher priority = stronger historical performance. "
-                        f"TOP_PICK symbols are proven performers.\n"
+                        f"Pick the BEST symbol from: {', '.join(priority_hints)}.\n"
+                        f"Each entry shows: name(priority,regime,action). "
+                        f"TOP_PICK = proven performer. "
+                        f"Pick the symbol most likely to move in its regime direction.\n"
                         f"Reply ONLY with JSON: {{\"symbol\":\"GOLD\",\"action\":\"BUY\"}}\n"
-                        f"action must be BUY or SELL. symbol must be from the list. JSON only."
+                        f"Use EXACTLY the action shown for your chosen symbol. JSON only."
                     )
                 }]
             )
@@ -1707,12 +1739,13 @@ def run_scanner():
             start = text.find("{")
             end   = text.rfind("}") + 1
             if start >= 0 and end > start:
-                r      = json.loads(text[start:end])
-                raw    = str(r.get("symbol","")).upper().strip()
-                act    = str(r.get("action","BUY")).upper().strip()
-                sym    = raw    if raw in available else available[0]
-                action = act    if act in ["BUY","SELL"] else "BUY"
-            print(f"[ENGINE4] Claude picked: {sym} {action}")
+                r   = json.loads(text[start:end])
+                raw = str(r.get("symbol","")).upper().strip()
+                sym = raw if raw in available else available[0]
+            # Always use regime-determined action — not Claude's action field
+            action = regime_actions.get(sym, "BUY")
+            print(f"[ENGINE1] Regime actions: {regime_actions}")
+            print(f"[ENGINE4] Claude picked: {sym} → action={action} (regime={symbol_regimes.get(sym.upper(),'NEUTRAL')})")
         except Exception as e:
             print(f"[ENGINE4] Claude pick error: {e} — using {sym} {action}")
 
@@ -1732,24 +1765,25 @@ def run_scanner():
         candidates_to_try = [sym] + [s for s in available if s != sym]
 
         for try_sym in candidates_to_try[:5]:
+            try_action    = regime_actions.get(try_sym, "BUY")  # E1 Full: regime action
             sym_min_score = _personality_min_score(try_sym)
-            score = _claude_validate(try_sym, action, "0", "BB")
-            print(f"[ENGINE4] {try_sym} {action} → Score:{score}/5 (need≥{sym_min_score})")
+            score = _claude_validate(try_sym, try_action, "0", "BB")
+            print(f"[ENGINE4] {try_sym} {try_action} → Score:{score}/5 (need≥{sym_min_score})")
             if score >= sym_min_score:
                 final_sym    = try_sym
-                final_action = action
+                final_action = try_action
                 final_score  = score
                 break
             elif score >= 2 and not final_sym:
                 final_sym    = try_sym
-                final_action = action
+                final_action = try_action
                 final_score  = score
 
         if not final_sym:
             final_sym    = available[0]
-            final_action = action
+            final_action = regime_actions.get(final_sym, "BUY")
             final_score  = _claude_validate(final_sym, final_action, "0", "BB")
-            print(f"[ENGINE4] Using best available: {final_sym} Score:{final_score}")
+            print(f"[ENGINE4] Using best available: {final_sym} {final_action} Score:{final_score}")
 
         print(f"[ENGINE4] Final pick: {final_sym} {final_action} Score:{final_score}/5")
 
