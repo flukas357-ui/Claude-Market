@@ -1,15 +1,15 @@
 """
-Claude-Market Webhook Server v7.9
+Claude-Market Webhook Server v8.0
 Lukas Ferreira - Pretoria ZA
-MCAPI ENGINE 1 FULL — 3-CONDITION REGIME
-v7.9: Engine 1 Full — BULLISH / RANGING / BEARISH per symbol
-      BULLISH  → BUY only  (trade with uptrend)
-      BEARISH  → SELL only (trade with downtrend — unlocks SELL signals)
-      RANGING  → BUY at lower band / SELL at upper band (mean reversion)
-      Regime determines action — not hardcoded BUY
-      Claude picks symbol — regime determines direction
-      All 8 engines now gate every signal
-      H4 confirmation — EA batch update (coming with Engine 5+8)
+MCAPI ENGINE 5 — VOLATILITY GATE
+v8.0: Engine 5 live — ATR volatility gate before every signal
+      EA v9.1 sends H1 ATR(14) per symbol in every status POST
+      Too volatile  (ATR > max%) → block — spike or news event
+      Too quiet     (ATR < min%) → block — dead market, spread too costly
+      Per-symbol thresholds — different limits for BTC vs EURUSD
+      Tries alternative symbols if primary is outside range
+      /volatility endpoint — live ATR status per symbol
+      Engine 1 Full active — 3-condition regime determines action
 """
 
 from flask import Flask, request, jsonify
@@ -190,6 +190,15 @@ recently_traded  = {}  # {symbol: datetime} — 6-hour expiry rotation guard
 scan_lock        = threading.Lock()
 symbol_regimes   = {}  # Engine 1: {symbol: "BULLISH"/"NEUTRAL"/"BEARISH"}
 bb_data          = {}  # Engine 6: {symbol: {upper,middle,lower,price,location,range}}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE 5 — VOLATILITY
+# EA sends H1 ATR(14) per symbol in every /status POST
+# Webhook gates signals when volatility is too HIGH (spike/news)
+# or too LOW (dead market — no movement, spread too costly)
+# ATR evaluated as % of current price — works for all symbols and price levels
+# ══════════════════════════════════════════════════════════════════════════════
+volatility_data  = {}  # {symbol: {"atr": float, "atr_pct": float, "timestamp": str}}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENGINE 3 — CALENDAR / NEWS FILTER
@@ -544,7 +553,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "7.9",
+        "version": "8.0",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -661,6 +670,19 @@ def receive_status():
                       f"lower={bbd.get('lower',0):.2f} "
                       f"price={bbd.get('price',0):.2f}")
 
+        # Engine 5: Store ATR data (volatility) from EA v9.1
+        ea_atr = data.get("atr_data", {})
+        for sym, atr_val in ea_atr.items():
+            if isinstance(atr_val, (int, float)) and atr_val > 0:
+                price = bb_data.get(sym.upper(), {}).get("price", 0)
+                atr_pct = (atr_val / price * 100) if price > 0 else 0
+                volatility_data[sym.upper()] = {
+                    "atr":       round(atr_val, 5),
+                    "atr_pct":   round(atr_pct, 4),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                print(f"[ENGINE5] ATR data: {sym} ATR={atr_val:.5f} ({atr_pct:.3f}% of price)")
+
         # Engine 7: Track portfolio equity for drawdown calculation
         equity = data.get("equity")
         if equity:
@@ -772,6 +794,68 @@ def manual_scan():
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE 5 HELPERS — Volatility Gate
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Per-symbol volatility thresholds (ATR as % of price)
+# Too volatile = spike, news event — spread costs too high
+# Too quiet   = dead market, no momentum, trade stalls
+VOLATILITY_LIMITS = {
+    "USDZAR":    {"min_pct": 0.05, "max_pct": 1.50},
+    "EURUSD":    {"min_pct": 0.02, "max_pct": 0.80},
+    "GOLD":      {"min_pct": 0.05, "max_pct": 1.50},
+    "SILVER":    {"min_pct": 0.08, "max_pct": 2.00},
+    "BTCUSD":    {"min_pct": 0.20, "max_pct": 4.00},
+    "ETHUSD":    {"min_pct": 0.15, "max_pct": 3.50},
+    "US_TECH100":{"min_pct": 0.05, "max_pct": 2.00},
+    "US_500":    {"min_pct": 0.04, "max_pct": 1.50},
+}
+
+def _check_volatility(symbol: str) -> tuple:
+    """
+    Engine 5: Is the current volatility acceptable for this symbol?
+    Returns (allowed, reason).
+    Passes if no ATR data — never blocks on missing data.
+    """
+    sym  = symbol.upper()
+    data = volatility_data.get(sym)
+    if not data:
+        return True, f"ENGINE5 ✅ No ATR data for {sym} — passing"
+
+    atr_pct = data["atr_pct"]
+    limits  = VOLATILITY_LIMITS.get(sym, {"min_pct": 0.02, "max_pct": 3.0})
+    min_pct = limits["min_pct"]
+    max_pct = limits["max_pct"]
+
+    if atr_pct > max_pct:
+        return False, (f"ENGINE5 ❌ {sym} TOO VOLATILE: ATR={atr_pct:.3f}% "
+                       f"(limit {max_pct}%) — spike or news event. Waiting for calm.")
+    if atr_pct < min_pct:
+        return False, (f"ENGINE5 ❌ {sym} TOO QUIET: ATR={atr_pct:.3f}% "
+                       f"(min {min_pct}%) — dead market, no momentum. Spread too costly.")
+
+    return True, (f"ENGINE5 ✅ {sym} volatility OK: ATR={atr_pct:.3f}% "
+                  f"(range {min_pct}%–{max_pct}%)")
+
+
+@app.route("/volatility", methods=["GET"])
+def get_volatility():
+    """Engine 5: Live ATR volatility status per symbol"""
+    result = {}
+    for sym, data in volatility_data.items():
+        limits  = VOLATILITY_LIMITS.get(sym, {"min_pct": 0.02, "max_pct": 3.0})
+        atr_pct = data["atr_pct"]
+        status  = ("TOO_HIGH" if atr_pct > limits["max_pct"] else
+                   "TOO_LOW"  if atr_pct < limits["min_pct"] else "OK")
+        result[sym] = {**data, "status": status, "limits": limits}
+    return jsonify({
+        "engine":    "5 — Volatility",
+        "symbols":   result,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+
 # ENGINE 3 HELPERS — Calendar / News Filter
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1832,6 +1916,26 @@ def run_scanner():
             if not regime_found:
                 print(f"[ENGINE1] All candidates blocked by regime — signal held. "
                       f"Waiting for regime alignment on next scan.")
+                return
+
+        # ── Step 4.6: ENGINE 5 — Volatility Gate ─────────────────────────────
+        vol_ok, vol_reason = _check_volatility(final_sym)
+        print(f"[ENGINE5] {vol_reason}")
+        if not vol_ok:
+            # Try alternative symbols with acceptable volatility
+            vol_found = False
+            for alt_sym in candidates_to_try[:5]:
+                if alt_sym == final_sym:
+                    continue
+                alt_ok, alt_reason = _check_volatility(alt_sym)
+                if alt_ok:
+                    print(f"[ENGINE5] Alternative volatility-OK: {alt_sym}")
+                    final_sym    = alt_sym
+                    final_action = regime_actions.get(alt_sym, "BUY")
+                    vol_found    = True
+                    break
+            if not vol_found:
+                print(f"[ENGINE5] All candidates outside volatility range — holding")
                 return
 
         # ── Step 4.6: ENGINE 3 — Calendar / News Filter ──────────────────────
