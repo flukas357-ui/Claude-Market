@@ -1,15 +1,15 @@
 """
-Claude-Market Webhook Server v7.7
+Claude-Market Webhook Server v7.8
 Lukas Ferreira - Pretoria ZA
-MCAPI — 8 SYMBOL EXPANSION
-v7.7: Added EURUSD + US500 to active scanner
-      2 metals (GOLD/SILVER) + 2 crypto (BTC/ETH) + 2 forex (USDZAR/EURUSD) + 2 indices (NAS100/US500)
-      EURUSD priority raised to 2 — active scanner symbol
-      US500 added — confirm Ava Trade symbol name before opening chart
-      Market hours: US500 + US_TECH100 both gated to 14:30-21:00 UTC
-      Engine 6 blocks any symbol without an open MT5 chart (no BB data = BLOCK)
-      Engine 7 session risk active
-      Database persistent trade history
+MCAPI ENGINE 3 — CALENDAR / NEWS FILTER
+v7.8: Engine 3 live — news event gate before every signal
+      Source: ForexFactory weekly calendar (free, no API key)
+      HIGH impact: blocks 30 min before + 15 min after
+      MEDIUM impact: blocks 15 min before only
+      Tries alternative symbols if primary is news-blocked
+      Never blocks on network error — passes through safely
+      /news endpoint — live upcoming events for Config Tab
+      8 symbols active — USDZAR GOLD SILVER BTC ETH NAS EURUSD US_500
 """
 
 from flask import Flask, request, jsonify
@@ -190,6 +190,31 @@ recently_traded  = {}  # {symbol: datetime} — 6-hour expiry rotation guard
 scan_lock        = threading.Lock()
 symbol_regimes   = {}  # Engine 1: {symbol: "BULLISH"/"NEUTRAL"/"BEARISH"}
 bb_data          = {}  # Engine 6: {symbol: {upper,middle,lower,price,location,range}}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE 3 — CALENDAR / NEWS FILTER
+# Source: ForexFactory weekly calendar (free, no API key needed)
+# Blocks signals 30 min before HIGH impact events on symbol's currencies
+# Blocks signals 15 min after HIGH impact events (volatility still elevated)
+# Medium impact: blocks 15 min before only
+# Passes through if calendar unavailable — never blocks on network error
+# ══════════════════════════════════════════════════════════════════════════════
+_news_calendar   = []          # Cached weekly events from ForexFactory
+_news_last_fetch = None        # Last fetch timestamp
+_NEWS_FETCH_URL  = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+# Which currencies drive each symbol — used to match news events
+NEWS_CURRENCIES = {
+    "USDZAR":    ["USD", "ZAR"],
+    "EURUSD":    ["EUR", "USD"],
+    "GOLD":      ["USD"],         # Gold priced in USD — Fed news moves it
+    "SILVER":    ["USD"],
+    "BTCUSD":    ["USD"],
+    "ETHUSD":    ["USD"],
+    "US_TECH100":["USD"],
+    "US_500":    ["USD"],
+    "US_30":     ["USD"],
+}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENGINE 7 — SESSION RISK STATE
@@ -415,7 +440,7 @@ PERSONALITY = {
         "location_zone":  0.33,
         "notes":          "NAS100 — tech heavy. US session 14:30-21:00 UTC only."
     },
-    "US500": {
+    "US_500": {
         "blacklist":      False,
         "priority":       2,          # Equal to NAS100 — broader market
         "min_score":      3,
@@ -425,8 +450,7 @@ PERSONALITY = {
         "tp_ratio":       1.5,
         "trail_pct":      15,
         "location_zone":  0.33,
-        "notes":          "S&P500 — 500 stocks, less tech-heavy than NAS100. "
-                          "Confirm exact Ava Trade symbol name (US500 / SPX500 / SP500)."
+        "notes":          "S&P500 — 500 stocks, less tech-heavy than NAS100. US session only. Ava symbol: US_500"
     },
 
     "GBPJPY": {
@@ -520,7 +544,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "7.7",
+        "version": "7.8",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -747,6 +771,157 @@ def manual_scan():
     return jsonify({"status": "Scanner triggered manually"})
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE 3 HELPERS — Calendar / News Filter
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _parse_ff_datetime(date_str: str, time_str: str):
+    """
+    Parse ForexFactory date/time to UTC datetime.
+    date_str: "05-17-2026"   time_str: "2:00pm" / "All Day" / "Tentative"
+    FF times are US Eastern (EDT = UTC-4 in summer, EST = UTC-5 in winter).
+    We use UTC-4 (EDT) as the standard approximation — accurate within 1 hour
+    which is more than enough for a 30-minute blocking window.
+    """
+    if not time_str or time_str.strip() in [
+        "All Day", "Tentative", "Day 1", "Day 2", "Day 3", "", "N/A"
+    ]:
+        return None
+    try:
+        m, d, y = date_str.strip().split("-")
+        ts = time_str.strip().lower().replace(" ", "")
+        is_pm = "pm" in ts
+        is_am = "am" in ts
+        ts = ts.replace("pm", "").replace("am", "")
+        if ":" in ts:
+            h, mn = ts.split(":")
+        else:
+            h, mn = ts, "00"
+        h, mn = int(h), int(mn)
+        if is_pm and h != 12:
+            h += 12
+        elif is_am and h == 12:
+            h = 0
+        dt_eastern = datetime(int(y), int(m), int(d), h, mn)
+        return dt_eastern + timedelta(hours=4)   # EDT → UTC
+    except Exception as e:
+        return None
+
+
+def _fetch_news_calendar():
+    """Download and cache the ForexFactory weekly calendar."""
+    global _news_calendar, _news_last_fetch
+    try:
+        req = urllib.request.Request(
+            _NEWS_FETCH_URL,
+            headers={"User-Agent": "Mozilla/5.0 MCAPI-Engine3/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+        _news_calendar = data if isinstance(data, list) else []
+        _news_last_fetch = datetime.utcnow()
+        high_count = sum(1 for e in _news_calendar if e.get("impact") == "High")
+        print(f"[ENGINE3] Calendar loaded: {len(_news_calendar)} events "
+              f"({high_count} HIGH impact) this week")
+    except Exception as e:
+        print(f"[ENGINE3] Calendar fetch failed: {e} — passing all signals through")
+        _news_last_fetch = datetime.utcnow()   # Prevent retry storm
+
+
+def _check_news(symbol: str, action: str) -> tuple:
+    """
+    Engine 3: News gate. Returns (allowed, reason).
+    HIGH impact: block 30 min before + 15 min after
+    MEDIUM impact: block 15 min before only
+    If calendar unavailable → PASS (never block on network error)
+    """
+    global _news_calendar, _news_last_fetch
+
+    # Refresh calendar every 6 hours
+    if (_news_last_fetch is None or
+            (datetime.utcnow() - _news_last_fetch).total_seconds() > 21600):
+        _fetch_news_calendar()
+
+    if not _news_calendar:
+        return True, "ENGINE3 ✅ Calendar unavailable — passing"
+
+    currencies = NEWS_CURRENCIES.get(symbol.upper(), ["USD"])
+    now = datetime.utcnow()
+    upcoming = []
+
+    for event in _news_calendar:
+        impact  = event.get("impact", "")
+        country = event.get("country", "")
+        if impact not in ["High", "Medium"]:
+            continue
+        if country not in currencies:
+            continue
+        event_dt = _parse_ff_datetime(event.get("date",""), event.get("time",""))
+        if not event_dt:
+            continue
+
+        minutes_to = (event_dt - now).total_seconds() / 60
+
+        if impact == "High":
+            # Block 30 min before and 15 min after
+            if -15 <= minutes_to <= 30:
+                return False, (
+                    f"ENGINE3 ❌ NEWS BLOCK: {event.get('title','?')} "
+                    f"({country} · HIGH) "
+                    f"{'in ' + str(int(minutes_to)) + ' min' if minutes_to >= 0 else str(int(-minutes_to)) + ' min ago'}. "
+                    f"Trading resumes when volatility settles."
+                )
+            if 0 <= minutes_to <= 120:
+                upcoming.append(f"{event.get('title','?')} ({country}) in {int(minutes_to)}m")
+
+        elif impact == "Medium":
+            # Block 15 min before only
+            if 0 <= minutes_to <= 15:
+                return False, (
+                    f"ENGINE3 ❌ NEWS BLOCK: {event.get('title','?')} "
+                    f"({country} · MEDIUM) in {int(minutes_to)} min."
+                )
+
+    upcoming_str = " | Next: " + upcoming[0] if upcoming else ""
+    return True, f"ENGINE3 ✅ News clear for {symbol}{upcoming_str}"
+
+
+@app.route("/news", methods=["GET"])
+def get_news():
+    """Engine 3: Live news calendar status — Config Tab reads this"""
+    if (_news_last_fetch is None or
+            (datetime.utcnow() - _news_last_fetch).total_seconds() > 21600):
+        _fetch_news_calendar()
+
+    now = datetime.utcnow()
+    upcoming_high = []
+    for event in _news_calendar:
+        if event.get("impact") != "High":
+            continue
+        event_dt = _parse_ff_datetime(event.get("date",""), event.get("time",""))
+        if not event_dt:
+            continue
+        minutes_to = (event_dt - now).total_seconds() / 60
+        if -60 <= minutes_to <= 240:
+            upcoming_high.append({
+                "title":      event.get("title"),
+                "country":    event.get("country"),
+                "time_utc":   event_dt.strftime("%H:%M UTC") if event_dt else "?",
+                "minutes_to": round(minutes_to),
+                "impact":     event.get("impact"),
+            })
+
+    upcoming_high.sort(key=lambda x: x["minutes_to"])
+    return jsonify({
+        "engine":          "3 — Calendar / News Filter",
+        "status":          "LIVE",
+        "last_fetch":      _news_last_fetch.isoformat() if _news_last_fetch else None,
+        "total_events":    len(_news_calendar),
+        "upcoming_high":   upcoming_high[:10],
+        "timestamp":       now.isoformat(),
+    })
+
+
 # ENGINE 7 HELPERS — Session Risk Management
 # ══════════════════════════════════════════════════════════════════════════════
 def _e7_update_equity(equity: float):
@@ -1466,7 +1641,7 @@ def run_scanner():
         # v7.7: Added EURUSD (2 forex) + US500 placeholder (confirm Ava symbol name)
         # 8 symbols: 2 metals + 2 crypto + 2 forex + 2 US indices
         # US500 will be blocked by Engine 6 until chart + EA is open in MT5
-        all_syms = ["USDZAR","GOLD","SILVER","BTCUSD","ETHUSD","US_TECH100","EURUSD","US500"]
+        all_syms = ["USDZAR","GOLD","SILVER","BTCUSD","ETHUSD","US_TECH100","EURUSD","US_500"]
 
         # Engine 4: Filter using personality
         available = []
@@ -1624,8 +1799,33 @@ def run_scanner():
                 print(f"[ENGINE1] All candidates blocked by regime — signal held. "
                       f"Waiting for regime alignment on next scan.")
                 return
+
+        # ── Step 4.6: ENGINE 3 — Calendar / News Filter ──────────────────────
+        # Blocks signal if high-impact news event for this symbol's currencies
+        # is within 30 minutes. Tries alternatives if available.
+        news_ok, news_reason = _check_news(final_sym, final_action)
+        print(f"[ENGINE3] {news_reason}")
+        scan_results["news_check"] = {
+            "symbol": final_sym, "passed": news_ok, "reason": news_reason
+        }
+        if not news_ok:
+            # Try alternative symbols that are news-clear
+            news_found = False
+            for alt_sym in candidates_to_try[:5]:
+                if alt_sym == final_sym:
+                    continue
+                alt_ok, alt_reason = _check_news(alt_sym, final_action)
+                if alt_ok:
+                    print(f"[ENGINE3] Alternative news-clear: {alt_sym}")
+                    final_sym  = alt_sym
+                    news_found = True
+                    break
+            if not news_found:
+                print(f"[ENGINE3] All candidates news-blocked — holding until event passes")
+                return
+
         # Is price at the RIGHT LOCATION on the Bollinger Bands?
-        # Only applies to symbols with BB data (5 charted symbols)
+        # Only applies to symbols with BB data (8 charted symbols)
         struct_ok, struct_reason = _check_structure(final_sym, final_action)
         print(f"[ENGINE6] {struct_reason}")
         scan_results["structure"] = {
