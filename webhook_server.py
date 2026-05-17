@@ -1,16 +1,15 @@
 """
-Claude-Market Webhook Server v7.6
+Claude-Market Webhook Server v7.7
 Lukas Ferreira - Pretoria ZA
-MCAPI ENGINE 7 — SESSION RISK MANAGEMENT
-v7.6: Engine 7 full — session-based risk (not arbitrary daily resets)
-      Portfolio drawdown from session start → pause all trading
-      Per-symbol session losses → pause that symbol for session
-      Consecutive loss guard → pause symbol until next win
-      Session resets at 04:00 UTC (06:00 SAST) — Lukas's natural start
-      /risk endpoint — live risk status for Config Tab
-      EA v9.0 Gate 6 enforces same rules locally
-      Database persistent trade history active
-Model: claude-sonnet-4-6
+MCAPI — 8 SYMBOL EXPANSION
+v7.7: Added EURUSD + US500 to active scanner
+      2 metals (GOLD/SILVER) + 2 crypto (BTC/ETH) + 2 forex (USDZAR/EURUSD) + 2 indices (NAS100/US500)
+      EURUSD priority raised to 2 — active scanner symbol
+      US500 added — confirm Ava Trade symbol name before opening chart
+      Market hours: US500 + US_TECH100 both gated to 14:30-21:00 UTC
+      Engine 6 blocks any symbol without an open MT5 chart (no BB data = BLOCK)
+      Engine 7 session risk active
+      Database persistent trade history
 """
 
 from flask import Flask, request, jsonify
@@ -336,15 +335,15 @@ PERSONALITY = {
     # ── FOREX MAJORS ───────────────────────────────────────────────────────────
     "EURUSD": {
         "blacklist":      False,
-        "priority":       1,
-        "min_score":      4,          # Sprint 0: 0/1. Higher bar.
+        "priority":       2,          # v7.7: Raised to 2 — active scanner symbol
+        "min_score":      3,
         "sessions":       ["London","New York"],
         "max_daily":      2,
         "sl_points":      30,
         "tp_ratio":       1.5,
         "trail_pct":      20,
         "location_zone":  0.33,
-        "notes":          "Tight range. Needs strong session alignment."
+        "notes":          "Most liquid forex pair. London/NY peak hours. Clean BB signals."
     },
     "GBPUSD": {
         "blacklist":      False,
@@ -402,6 +401,34 @@ PERSONALITY = {
         "location_zone":  0.40,       # Slightly more tolerant — trends well
         "notes":          "Sprint 0 STAR: 100% win rate, +$339. Prioritise always."
     },
+
+    # ── US INDICES ─────────────────────────────────────────────────────────────
+    "US_TECH100": {
+        "blacklist":      False,
+        "priority":       2,
+        "min_score":      3,
+        "sessions":       ["New York"],
+        "max_daily":      2,
+        "sl_points":      50,
+        "tp_ratio":       1.5,
+        "trail_pct":      15,
+        "location_zone":  0.33,
+        "notes":          "NAS100 — tech heavy. US session 14:30-21:00 UTC only."
+    },
+    "US500": {
+        "blacklist":      False,
+        "priority":       2,          # Equal to NAS100 — broader market
+        "min_score":      3,
+        "sessions":       ["New York"],
+        "max_daily":      2,
+        "sl_points":      15,
+        "tp_ratio":       1.5,
+        "trail_pct":      15,
+        "location_zone":  0.33,
+        "notes":          "S&P500 — 500 stocks, less tech-heavy than NAS100. "
+                          "Confirm exact Ava Trade symbol name (US500 / SPX500 / SP500)."
+    },
+
     "GBPJPY": {
         "blacklist":      False,
         "priority":       1,
@@ -493,7 +520,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "7.6",
+        "version": "7.7",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -1098,7 +1125,7 @@ def is_asset_open(sym):
         return False
 
     # ── US Indices: 14:30–21:00 UTC (16:30–23:00 SAST) ───────────────────────
-    if sym in ["US_TECH100","NAS100","US_500","US_30"]:
+    if sym in ["US_TECH100","US500","SPX500","SP500","NAS100","US_500","US_30"]:
         return 14.5 <= h <= 21.0
 
     # ── European Indices: 07:00–15:30 UTC ────────────────────────────────────
@@ -1436,9 +1463,10 @@ def run_scanner():
         session  = "London" if 8<=utc_hour<16 else "New York" if 13<=utc_hour<21 else "Asian"
 
         # Base symbol list — ONLY symbols with open MT5 charts sending BB data
-        # v7.3: Removed EURUSD, GBPUSD, USDJPY, GBPJPY, USDCAD, AUDJPY
-        # These have no BB data → Engine 6 was auto-passing them → wrong signals
-        all_syms = ["USDZAR","GOLD","SILVER","BTCUSD","ETHUSD","US_TECH100"]
+        # v7.7: Added EURUSD (2 forex) + US500 placeholder (confirm Ava symbol name)
+        # 8 symbols: 2 metals + 2 crypto + 2 forex + 2 US indices
+        # US500 will be blocked by Engine 6 until chart + EA is open in MT5
+        all_syms = ["USDZAR","GOLD","SILVER","BTCUSD","ETHUSD","US_TECH100","EURUSD","US500"]
 
         # Engine 4: Filter using personality
         available = []
@@ -1693,4 +1721,3 @@ if __name__ == "__main__":
     print(f"Claude-Market Webhook Server v6.9 — Engine 1 + Engine 2 SESSION FILTER — port {port}")
     print(f"Autonomous: scanner every 30min + self-ping every 10min")
     app.run(host="0.0.0.0", port=port)
-
