@@ -1,4 +1,4 @@
-""" 
+"""
 Claude-Market Webhook Server v8.3
 Lukas Ferreira - Pretoria ZA
 MCAPI — CLOSE REQUEST FROM FORENSICS
@@ -2263,6 +2263,29 @@ def run_scanner():
         print(f"[ENGINE4] ✅ Signal fired → {final_sym} {final_action} Score:{final_score}/5")
 
 # ─── Background Scanner Thread ─────────────────────────────────────────────────
+def get_scan_interval():
+    """
+    Dynamic scan interval based on active trading session (UTC time).
+    More frequent during high-liquidity windows, slower during off-hours.
+    """
+    h = datetime.utcnow().hour + datetime.utcnow().minute / 60.0
+
+    if 13.5 <= h < 17.0:   # London/NY overlap — peak liquidity
+        interval = 10 * 60
+        session  = "London/NY overlap"
+    elif 8.0 <= h < 13.5:  # London session
+        interval = 20 * 60
+        session  = "London"
+    elif 17.0 <= h < 22.0: # NY session alone
+        interval = 15 * 60
+        session  = "New York"
+    else:                   # Asian / off-hours
+        interval = 45 * 60
+        session  = "Asian/off-hours"
+
+    print(f"[SCANNER] Next scan in {interval//60} min — {session} session ({h:.1f}h UTC)")
+    return interval
+
 def scanner_loop():
     time.sleep(60)  # Initial delay — let server start
     while True:
@@ -2270,7 +2293,7 @@ def scanner_loop():
             run_scanner()
         except Exception as e:
             print(f"[SCANNER ERROR] {e}")
-        time.sleep(30 * 60)  # 30-minute cycle
+        time.sleep(get_scan_interval())
 
 # ─── Self-Ping Thread — keeps Render free tier awake 24/7 ─────────────────────
 def self_ping_loop():
