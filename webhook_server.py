@@ -1,12 +1,10 @@
 """
-Claude-Market Webhook Server v8.2
+Claude-Market Webhook Server v8.3
 Lukas Ferreira - Pretoria ZA
-MCAPI ENGINE 10 — MANUAL TRADE CONTROL
-v8.2: /manual-signal POST — CC fires trade directly, bypasses engine gates
-      /manual-signal GET  — CC checks if signal was collected by EA
-      Manual trades tagged source=MANUAL, score=5 (passes EA Gate 1)
-      EA Cooldown gate still applies (90 min per symbol)
-      Comparison: manual vs auto trade data in /history (filter by source)
+MCAPI — CLOSE REQUEST FROM FORENSICS
+v8.3: /close-request POST — Forensics page sends ticket to close
+      /close-request GET  — EA polls every 10s, closes position if pending
+      Manual trades can now be closed directly from Engine 10 page
 """
 
 from flask import Flask, request, jsonify
@@ -169,6 +167,7 @@ def handle_options(path=""):
 
 # ─── State ────────────────────────────────────────────────────────────────────
 pending_signal   = None          # Signal waiting for EA to pick up
+close_requests   = []            # [{ticket, symbol, timestamp}] — FIFO queue
 close_signal     = None          # Close signal for EA (future auto-close)
 trading_enabled  = True          # Kill switch
 mt5_status       = {}            # Latest data posted by EA
@@ -561,7 +560,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "8.2",
+        "version": "8.3",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -701,6 +700,39 @@ def get_manual_signal_status():
         "signal":    pending_signal,
         "timestamp": datetime.utcnow().isoformat()
     })
+
+
+@app.route("/close-request", methods=["POST"])
+def post_close_request():
+    """Forensics page sends a close request for a specific ticket."""
+    global close_requests
+    try:
+        data   = request.get_json(force=True)
+        ticket = int(data.get("ticket", 0))
+        symbol = str(data.get("symbol", "")).upper().strip()
+        if not ticket:
+            return jsonify({"ok": False, "error": "ticket required"}), 400
+        if any(r["ticket"] == ticket for r in close_requests):
+            return jsonify({"ok": True, "ticket": ticket, "note": "Already queued"})
+        close_requests.append({"ticket": ticket, "symbol": symbol,
+                                "timestamp": datetime.utcnow().isoformat()})
+        print(f"[CLOSE] Close request queued: ticket={ticket} symbol={symbol}")
+        return jsonify({"ok": True, "ticket": ticket, "queued": True,
+                        "note": "EA will close within 10 seconds"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/close-request", methods=["GET"])
+def get_close_request():
+    """EA polls this every 10 seconds. Returns first pending close request."""
+    global close_requests
+    if close_requests:
+        req = close_requests.pop(0)
+        print(f"[CLOSE] Delivering to EA: ticket={req['ticket']}")
+        return jsonify({"pending": True, **req})
+    return jsonify({"pending": False, "timestamp": datetime.utcnow().isoformat()})
+
 
 # ─── EA Status Receiver ────────────────────────────────────────────────────────
 @app.route("/status", methods=["POST"])
