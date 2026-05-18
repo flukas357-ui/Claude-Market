@@ -1,16 +1,12 @@
 """
-Claude-Market Webhook Server v8.1
+Claude-Market Webhook Server v8.2
 Lukas Ferreira - Pretoria ZA
-MCAPI ENGINE 9 — MEMORY / WIN RATE BIAS
-v8.1: Engine 9 live — win rate memory per symbol per regime per session
-      Rebuilt from PostgreSQL trade history on every startup
-      +1 score: ≥75% win rate in this exact setup (symbol+regime+session)
-      -1 score: ≤40% win rate — Claude told to avoid if alternatives exist
-       0 score: neutral or not enough data yet (needs ≥3 trades)
-      Memory updates live on every closed trade posted by EA
-      /memory endpoint — full win rate breakdown per symbol
-      USDZAR 100% win rate → automatic priority boost
-      Scanner prompt now includes mem=+1 / mem=-1 per symbol
+MCAPI ENGINE 10 — MANUAL TRADE CONTROL
+v8.2: /manual-signal POST — CC fires trade directly, bypasses engine gates
+      /manual-signal GET  — CC checks if signal was collected by EA
+      Manual trades tagged source=MANUAL, score=5 (passes EA Gate 1)
+      EA Cooldown gate still applies (90 min per symbol)
+      Comparison: manual vs auto trade data in /history (filter by source)
 """
 
 from flask import Flask, request, jsonify
@@ -565,7 +561,7 @@ def _personality_record_trade(symbol):
 def root():
     return jsonify({
         "service": "Claude-Market Webhook Server",
-        "version": "8.1",
+        "version": "8.2",
         "developer": "Lukas Ferreira - Pretoria ZA",
         "trading_enabled": trading_enabled,
         "pending_signal": pending_signal is not None,
@@ -652,6 +648,59 @@ def get_signal():
     pending_signal = None        # Clear once delivered
     print(f"[SIGNAL] Delivered to EA: {sig['symbol']} {sig['action']}")
     return jsonify({"signal": True, **sig})
+
+
+@app.route("/manual-signal", methods=["POST"])
+def post_manual_signal():
+    """
+    Command Centre fires a manual trade directly — bypasses all engine gates.
+    Signal queued into pending_signal → EA picks up within 10 seconds.
+    Trade tagged as source=MANUAL in comment so history can filter it.
+    Score=5 ensures EA Gate 1 passes. EA Cooldown (Gate 2) still applies —
+    if symbol was traded in last 90 min, EA will reject and log why.
+    """
+    global pending_signal
+    try:
+        data   = request.get_json(force=True)
+        symbol = str(data.get("symbol", "")).upper().strip()
+        action = str(data.get("action", "BUY")).upper().strip()
+        note   = str(data.get("note", "Manual trade — CC"))
+
+        valid_syms = ["GOLD","SILVER","USDZAR","EURUSD","BTCUSD",
+                      "ETHUSD","US_TECH100","US_500"]
+        if symbol not in valid_syms:
+            return jsonify({"ok": False, "error": f"{symbol} not in active symbol list"}), 400
+        if action not in ["BUY","SELL"]:
+            return jsonify({"ok": False, "error": "action must be BUY or SELL"}), 400
+
+        if pending_signal:
+            return jsonify({"ok": False,
+                            "error": "Auto signal already pending — wait for EA to collect it"}), 409
+
+        pending_signal = {
+            "symbol":    symbol,
+            "action":    action,
+            "score":     5,          # Max score — bypasses EA Gate 1
+            "type":      "MANUAL",
+            "source":    "MANUAL",
+            "note":      note,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        print(f"[MANUAL] Trade queued: {symbol} {action} — EA will pick up within 10s")
+        return jsonify({"ok": True, "queued": pending_signal,
+                        "note": "EA collects within 10 seconds via /signal poll"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/manual-signal", methods=["GET"])
+def get_manual_signal_status():
+    """CC checks if manual signal is still pending or was collected by EA"""
+    return jsonify({
+        "pending":   pending_signal is not None,
+        "signal":    pending_signal,
+        "timestamp": datetime.utcnow().isoformat()
+    })
 
 # ─── EA Status Receiver ────────────────────────────────────────────────────────
 @app.route("/status", methods=["POST"])
