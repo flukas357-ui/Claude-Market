@@ -2426,7 +2426,8 @@ def run_scanner():
     with scan_lock:
         print(f"\n[SCANNER] ═══ Starting — {datetime.utcnow().strftime('%H:%M UTC')} ═══")
         scan_results["last_run"] = datetime.utcnow().isoformat()
-        scan_results["next_run"] = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
+        next_mins = get_scan_interval() // 60
+        scan_results["next_run"] = (datetime.utcnow() + timedelta(minutes=next_mins)).isoformat()
 
         if not trading_enabled:
             print("[SCANNER] Skipped — kill switch active")
