@@ -734,7 +734,348 @@ def get_close_request():
     return jsonify({"pending": False, "timestamp": datetime.utcnow().isoformat()})
 
 
-# ─── EA Status Receiver ────────────────────────────────────────────────────────
+# ─── Brain Config — full system and per-symbol settings ───────────────────────
+
+DEFAULT_CONFIG = {
+    "system": {
+        "scan_asian_min":        45,
+        "scan_london_min":       20,
+        "scan_overlap_min":      10,
+        "scan_newyork_min":      15,
+        "heat_limit_pct":         8.0,
+        "drawdown_limit_pct":     5.0,
+        "max_session_losses":     2,
+        "max_consecutive_loss":   3,
+        "session_reset_hour":     4,
+        "global_cooldown_min":   90,
+        "risk_pct":               2.0,
+    },
+    "symbols": {
+        "GOLD": {
+            "active": True,
+            "confidence_threshold_pct": 65,
+            "bb_zone_pct":              30,
+            "min_atr_pct":            0.10,
+            "max_atr_pct":            2.00,
+            "session_asian":          False,
+            "session_london":          True,
+            "session_newyork":         True,
+            "max_daily_trades":           2,
+            "sl_mode":              "fixed",
+            "sl_points":                300,
+            "sl_atr_multiplier":        1.5,
+            "sl_min_points":             50,
+            "sl_max_points":           1000,
+            "tp_ratio":                 1.8,
+            "tp_range_ratio":           0.8,
+            "e8_enabled":              True,
+            "e8_tp1_ratio_pct":         100,
+            "e8_close_pct":              50,
+            "e8_move_sl_to_be":        True,
+            "trail_enabled":           True,
+            "trail_activate_pct":        40,
+            "trail_lock_pct":            50,
+            "trail_step_points":         10,
+            "risk_pct":                 2.0,
+            "max_lots":                1.00,
+            "seasonal_bias":       "neutral",
+            "weight_pct":               100,
+            "notes": "Trending symbol — BB SELL unreliable in uptrend"
+        },
+        "SILVER": {
+            "active": True,
+            "confidence_threshold_pct": 60,
+            "bb_zone_pct":              30,
+            "min_atr_pct":            0.10,
+            "max_atr_pct":            3.00,
+            "session_asian":          False,
+            "session_london":          True,
+            "session_newyork":         True,
+            "max_daily_trades":           2,
+            "sl_mode":              "fixed",
+            "sl_points":                200,
+            "sl_atr_multiplier":        1.5,
+            "sl_min_points":             30,
+            "sl_max_points":            500,
+            "tp_ratio":                 1.5,
+            "tp_range_ratio":           0.8,
+            "e8_enabled":              True,
+            "e8_tp1_ratio_pct":         100,
+            "e8_close_pct":              50,
+            "e8_move_sl_to_be":        True,
+            "trail_enabled":           True,
+            "trail_activate_pct":        40,
+            "trail_lock_pct":            50,
+            "trail_step_points":          5,
+            "risk_pct":                 2.0,
+            "max_lots":                1.00,
+            "seasonal_bias":       "neutral",
+            "weight_pct":               100,
+            "notes": "Follows GOLD but amplified. Best performer May 2026."
+        },
+        "USDZAR": {
+            "active": True,
+            "confidence_threshold_pct": 70,
+            "bb_zone_pct":              20,
+            "min_atr_pct":            0.05,
+            "max_atr_pct":            1.50,
+            "session_asian":          False,
+            "session_london":          True,
+            "session_newyork":         True,
+            "max_daily_trades":           1,
+            "sl_mode":              "fixed",
+            "sl_points":                300,
+            "sl_atr_multiplier":        1.5,
+            "sl_min_points":             50,
+            "sl_max_points":            800,
+            "tp_ratio":                 2.0,
+            "tp_range_ratio":           0.8,
+            "e8_enabled":              True,
+            "e8_tp1_ratio_pct":         100,
+            "e8_close_pct":              50,
+            "e8_move_sl_to_be":        True,
+            "trail_enabled":           True,
+            "trail_activate_pct":        40,
+            "trail_lock_pct":            50,
+            "trail_step_points":         20,
+            "risk_pct":                 2.0,
+            "max_lots":                1.00,
+            "seasonal_bias":       "neutral",
+            "weight_pct":               100,
+            "notes": "0% win rate May 2026. Higher bar. SA political risk."
+        },
+        "EURUSD": {
+            "active": True,
+            "confidence_threshold_pct": 60,
+            "bb_zone_pct":              30,
+            "min_atr_pct":            0.05,
+            "max_atr_pct":            1.00,
+            "session_asian":          False,
+            "session_london":          True,
+            "session_newyork":         True,
+            "max_daily_trades":           2,
+            "sl_mode":              "fixed",
+            "sl_points":                150,
+            "sl_atr_multiplier":        1.5,
+            "sl_min_points":             20,
+            "sl_max_points":            400,
+            "tp_ratio":                 1.5,
+            "tp_range_ratio":           0.8,
+            "e8_enabled":              True,
+            "e8_tp1_ratio_pct":         100,
+            "e8_close_pct":              50,
+            "e8_move_sl_to_be":        True,
+            "trail_enabled":           True,
+            "trail_activate_pct":        40,
+            "trail_lock_pct":            50,
+            "trail_step_points":          5,
+            "risk_pct":                 2.0,
+            "max_lots":                1.00,
+            "seasonal_bias":       "neutral",
+            "weight_pct":               100,
+            "notes": "Tightest spread. ECB/Fed driven. Reliable signals."
+        },
+        "BTCUSD": {
+            "active": True,
+            "confidence_threshold_pct": 75,
+            "bb_zone_pct":              20,
+            "min_atr_pct":            0.20,
+            "max_atr_pct":            4.00,
+            "session_asian":          False,
+            "session_london":         False,
+            "session_newyork":         True,
+            "max_daily_trades":           1,
+            "sl_mode":              "fixed",
+            "sl_points":                500,
+            "sl_atr_multiplier":        1.5,
+            "sl_min_points":            200,
+            "sl_max_points":           2000,
+            "tp_ratio":                 2.0,
+            "tp_range_ratio":           1.0,
+            "e8_enabled":              True,
+            "e8_tp1_ratio_pct":         100,
+            "e8_close_pct":              50,
+            "e8_move_sl_to_be":        True,
+            "trail_enabled":           True,
+            "trail_activate_pct":        30,
+            "trail_lock_pct":            50,
+            "trail_step_points":         50,
+            "risk_pct":                 1.0,
+            "max_lots":                0.10,
+            "seasonal_bias":       "neutral",
+            "weight_pct":               100,
+            "notes": "Halving cycle awareness needed. NY session only. High bar."
+        },
+        "ETHUSD": {
+            "active": True,
+            "confidence_threshold_pct": 65,
+            "bb_zone_pct":              25,
+            "min_atr_pct":            0.15,
+            "max_atr_pct":            3.50,
+            "session_asian":          False,
+            "session_london":         False,
+            "session_newyork":         True,
+            "max_daily_trades":           2,
+            "sl_mode":              "fixed",
+            "sl_points":                400,
+            "sl_atr_multiplier":        1.5,
+            "sl_min_points":            100,
+            "sl_max_points":           1500,
+            "tp_ratio":                 1.8,
+            "tp_range_ratio":           1.0,
+            "e8_enabled":              True,
+            "e8_tp1_ratio_pct":         100,
+            "e8_close_pct":              50,
+            "e8_move_sl_to_be":        True,
+            "trail_enabled":           True,
+            "trail_activate_pct":        30,
+            "trail_lock_pct":            50,
+            "trail_step_points":         30,
+            "risk_pct":                 1.0,
+            "max_lots":                0.20,
+            "seasonal_bias":       "neutral",
+            "weight_pct":               100,
+            "notes": "Follows BTC direction. Faster moves. Lower risk than BTC."
+        },
+        "US_TECH100": {
+            "active": True,
+            "confidence_threshold_pct": 55,
+            "bb_zone_pct":              30,
+            "min_atr_pct":            0.10,
+            "max_atr_pct":            3.00,
+            "session_asian":          False,
+            "session_london":         False,
+            "session_newyork":         True,
+            "max_daily_trades":           2,
+            "sl_mode":              "fixed",
+            "sl_points":                300,
+            "sl_atr_multiplier":        1.5,
+            "sl_min_points":            100,
+            "sl_max_points":           1000,
+            "tp_ratio":                 1.5,
+            "tp_range_ratio":           0.8,
+            "e8_enabled":              True,
+            "e8_tp1_ratio_pct":         100,
+            "e8_close_pct":              50,
+            "e8_move_sl_to_be":        True,
+            "trail_enabled":           True,
+            "trail_activate_pct":        40,
+            "trail_lock_pct":            50,
+            "trail_step_points":         20,
+            "risk_pct":                 2.0,
+            "max_lots":                0.50,
+            "seasonal_bias":       "neutral",
+            "weight_pct":               100,
+            "notes": "100% win rate May 2026. Lower threshold — keep trading."
+        },
+        "US_500": {
+            "active": True,
+            "confidence_threshold_pct": 55,
+            "bb_zone_pct":              30,
+            "min_atr_pct":            0.05,
+            "max_atr_pct":            2.00,
+            "session_asian":          False,
+            "session_london":         False,
+            "session_newyork":         True,
+            "max_daily_trades":           2,
+            "sl_mode":              "fixed",
+            "sl_points":                150,
+            "sl_atr_multiplier":        1.5,
+            "sl_min_points":             50,
+            "sl_max_points":            500,
+            "tp_ratio":                 1.5,
+            "tp_range_ratio":           0.8,
+            "e8_enabled":              True,
+            "e8_tp1_ratio_pct":         100,
+            "e8_close_pct":              50,
+            "e8_move_sl_to_be":        True,
+            "trail_enabled":           True,
+            "trail_activate_pct":        40,
+            "trail_lock_pct":            50,
+            "trail_step_points":         10,
+            "risk_pct":                 2.0,
+            "max_lots":                0.50,
+            "seasonal_bias":       "neutral",
+            "weight_pct":               100,
+            "notes": "Correlated with TECH100. Both NY session only."
+        }
+    }
+}
+
+# In-memory config (loaded from DB on start, saved back on change)
+_brain_config = dict(DEFAULT_CONFIG)
+
+def _load_brain_config():
+    """Load config from DB on startup."""
+    global _brain_config
+    try:
+        conn = _db_connect()
+        if not conn: return
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM brain_config WHERE key='main' LIMIT 1")
+        row = cur.fetchone()
+        if row:
+            _brain_config = json.loads(row[0])
+            print("[BRAIN] ✅ Config loaded from database")
+        else:
+            print("[BRAIN] No saved config — using defaults")
+        cur.close(); conn.close()
+    except Exception as e:
+        print(f"[BRAIN] Config load error: {e}")
+
+def _save_brain_config():
+    """Save current config to DB."""
+    try:
+        conn = _db_connect()
+        if not conn: return False
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS brain_config (
+                key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP DEFAULT NOW()
+            )""")
+        cur.execute("""
+            INSERT INTO brain_config (key, value, updated_at)
+            VALUES ('main', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()
+        """, (json.dumps(_brain_config),))
+        conn.commit(); cur.close(); conn.close()
+        return True
+    except Exception as e:
+        print(f"[BRAIN] Config save error: {e}")
+        return False
+
+@app.route("/config", methods=["GET"])
+def get_config():
+    """Brain Settings tool reads full config."""
+    return jsonify({"ok": True, "config": _brain_config,
+                    "defaults": DEFAULT_CONFIG})
+
+@app.route("/config", methods=["POST"])
+def post_config():
+    """Brain Settings tool writes full or partial config."""
+    global _brain_config
+    try:
+        data = request.get_json(force=True)
+        # Merge changes — supports full replace or partial update
+        if "system" in data:
+            _brain_config["system"].update(data["system"])
+        if "symbols" in data:
+            for sym, settings in data["symbols"].items():
+                if sym in _brain_config["symbols"]:
+                    _brain_config["symbols"][sym].update(settings)
+        saved = _save_brain_config()
+        print(f"[BRAIN] Config updated and {'saved' if saved else 'save failed'}")
+        return jsonify({"ok": True, "saved": saved, "config": _brain_config})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/config/reset", methods=["POST"])
+def reset_config():
+    """Reset to defaults."""
+    global _brain_config
+    _brain_config = dict(DEFAULT_CONFIG)
+    _save_brain_config()
+    return jsonify({"ok": True, "config": _brain_config})
 @app.route("/status", methods=["POST"])
 def receive_status():
     global mt5_status, trade_history, symbol_regimes, bb_data
@@ -2320,6 +2661,7 @@ threading.Thread(target=self_ping_loop, daemon=True).start()
 init_db()
 load_trades_from_db()
 _rebuild_memory()   # Engine 9: build win rate memory from trade history
+_load_brain_config()  # Brain: load saved symbol/system settings
 
 # ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
