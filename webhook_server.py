@@ -2950,6 +2950,31 @@ def trigger_brain_report():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/brain-ask", methods=["POST"])
+def brain_ask():
+    """
+    Brain Settings AI chat — proxies browser questions through webhook.
+    Browser cannot call Anthropic directly (CORS). Webhook holds the API key.
+    """
+    try:
+        data    = request.get_json(force=True)
+        prompt  = data.get("prompt", "").strip()
+        if not prompt:
+            return jsonify({"ok": False, "error": "No prompt provided"}), 400
+
+        resp = client.messages.create(
+            model      = "claude-sonnet-4-6",
+            max_tokens = 500,
+            messages   = [{"role": "user", "content": prompt}]
+        )
+        answer = resp.content[0].text.strip()
+        print(f"[BRAIN-ASK] Q: {prompt[:80]}...")
+        return jsonify({"ok": True, "answer": answer})
+    except Exception as e:
+        print(f"[BRAIN-ASK] Error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 def daily_analysis_loop():
     """Thread: runs daily brain analysis at 04:00 UTC (06:00 SAST)."""
     global _latest_brain_report
