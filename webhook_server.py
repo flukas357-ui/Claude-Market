@@ -67,10 +67,17 @@ def init_db():
                 deleted_at  TIMESTAMP DEFAULT NOW()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS brain_config (
+                key        TEXT PRIMARY KEY,
+                value      TEXT,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
         conn.commit()
         cur.close()
         conn.close()
-        print("[DB] ✅ Tables ready — trade_history + deleted_tickets")
+        print("[DB] ✅ Tables ready — trade_history + deleted_tickets + brain_config")
     except Exception as e:
         print(f"[DB] Init error: {e}")
 
