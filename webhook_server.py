@@ -1012,8 +1012,47 @@ DEFAULT_CONFIG = {
 # In-memory config (loaded from DB on start, saved back on change)
 _brain_config = dict(DEFAULT_CONFIG)
 
-def _load_brain_config():
-    """Load config from DB on startup."""
+def _sync_brain_to_personality():
+    """
+    Bridge: Push brain config values into the PERSONALITY dict.
+    This means all existing scanner code that reads PERSONALITY
+    automatically uses the Brain settings without any other changes.
+    """
+    sym_cfg = _brain_config.get("symbols", {})
+    for sym, brain in sym_cfg.items():
+        if sym not in PERSONALITY:
+            continue
+        p = PERSONALITY[sym]
+
+        # Active / blacklist
+        p["blacklist"] = not brain.get("active", True)
+
+        # Confidence threshold % → min_score (1-5)
+        conf = brain.get("confidence_threshold_pct", 60)
+        p["min_score"] = 5 if conf >= 90 else 4 if conf >= 75 else 3 if conf >= 55 else 2
+
+        # BB zone % → location_zone (0.0-1.0)
+        p["location_zone"] = brain.get("bb_zone_pct", 30) / 100.0
+
+        # Sessions list from booleans
+        sessions = []
+        if brain.get("session_asian"):   sessions.append("Asian")
+        if brain.get("session_london"):  sessions.append("London")
+        if brain.get("session_newyork"): sessions.append("New York")
+        if sessions: p["sessions"] = sessions
+
+        # Max daily trades
+        p["max_daily"] = brain.get("max_daily_trades", p.get("max_daily", 2))
+
+        # SL and TP
+        p["sl_points"] = brain.get("sl_points", p.get("sl_points", 200))
+        p["tp_ratio"]  = brain.get("tp_ratio",   p.get("tp_ratio",  1.5))
+
+        # Weight → priority (100%=3, 67%=2, 33%=1)
+        w = brain.get("weight_pct", 100)
+        p["priority"] = 3 if w >= 80 else 2 if w >= 50 else 1
+
+    print("[BRAIN] ✅ Config synced to personality engine")
     global _brain_config
     try:
         conn = _db_connect()
@@ -1026,6 +1065,7 @@ def _load_brain_config():
             print("[BRAIN] ✅ Config loaded from database")
         else:
             print("[BRAIN] No saved config — using defaults")
+        _sync_brain_to_personality()
         cur.close(); conn.close()
     except Exception as e:
         print(f"[BRAIN] Config load error: {e}")
@@ -1046,6 +1086,7 @@ def _save_brain_config():
             ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()
         """, (json.dumps(_brain_config),))
         conn.commit(); cur.close(); conn.close()
+        _sync_brain_to_personality()
         return True
     except Exception as e:
         print(f"[BRAIN] Config save error: {e}")
@@ -2613,22 +2654,23 @@ def run_scanner():
 # ─── Background Scanner Thread ─────────────────────────────────────────────────
 def get_scan_interval():
     """
-    Dynamic scan interval based on active trading session (UTC time).
-    More frequent during high-liquidity windows, slower during off-hours.
+    Dynamic scan interval based on active trading session.
+    Reads from Brain config — adjustable without code change.
     """
+    sys_cfg = _brain_config.get("system", {})
     h = datetime.utcnow().hour + datetime.utcnow().minute / 60.0
 
-    if 13.5 <= h < 17.0:   # London/NY overlap — peak liquidity
-        interval = 10 * 60
+    if 13.5 <= h < 17.0:
+        interval = sys_cfg.get("scan_overlap_min", 10) * 60
         session  = "London/NY overlap"
-    elif 8.0 <= h < 13.5:  # London session
-        interval = 20 * 60
+    elif 8.0 <= h < 13.5:
+        interval = sys_cfg.get("scan_london_min", 20) * 60
         session  = "London"
-    elif 17.0 <= h < 22.0: # NY session alone
-        interval = 15 * 60
+    elif 17.0 <= h < 22.0:
+        interval = sys_cfg.get("scan_newyork_min", 15) * 60
         session  = "New York"
-    else:                   # Asian / off-hours
-        interval = 45 * 60
+    else:
+        interval = sys_cfg.get("scan_asian_min", 45) * 60
         session  = "Asian/off-hours"
 
     print(f"[SCANNER] Next scan in {interval//60} min — {session} session ({h:.1f}h UTC)")
