@@ -1,5 +1,5 @@
-""" 
-Claude-Market Webhook Server v8.3  
+"""
+Claude-Market Webhook Server v8.3
 Lukas Ferreira - Pretoria ZA
 MCAPI — CLOSE REQUEST FROM FORENSICS
 v8.3: /close-request POST — Forensics page sends ticket to close
@@ -74,10 +74,17 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS brain_daily_report (
+                id         SERIAL PRIMARY KEY,
+                report     TEXT,
+                generated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
         conn.commit()
         cur.close()
         conn.close()
-        print("[DB] ✅ Tables ready — trade_history + deleted_tickets + brain_config")
+        print("[DB] ✅ Tables ready — trade_history + deleted_tickets + brain_config + brain_daily_report")
     except Exception as e:
         print(f"[DB] Init error: {e}")
 
@@ -2776,7 +2783,193 @@ def run_scanner():
         _personality_record_trade(final_sym)
         print(f"[ENGINE4] ✅ Signal fired → {final_sym} {final_action} Score:{final_score}/5")
 
-# ─── Background Scanner Thread ─────────────────────────────────────────────────
+# ─── Daily Brain Analysis — runs at 04:00 UTC (06:00 SAST) ───────────────────
+
+def _run_daily_brain_analysis():
+    """
+    ENGINE BRAIN: Runs daily at session reset (04:00 UTC).
+    Reviews every symbol's last 7 days of trades.
+    Claude generates per-symbol recommendations with suggested setting changes.
+    Report stored in DB — Brain Settings loads it on open.
+    """
+    print("\n[BRAIN] ═══ Daily Analysis Starting ═══")
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    symbols = ["GOLD","SILVER","USDZAR","EURUSD","BTCUSD","ETHUSD","US_TECH100","US_500"]
+    report  = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at_sast": (datetime.utcnow() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M SAST"),
+        "symbols": {}
+    }
+
+    for sym in symbols:
+        # Pull last 7 days for this symbol
+        sym_trades = [t for t in trade_history
+                      if t.get("symbol","").upper() == sym
+                      and t.get("received_at","") >= cutoff.isoformat()]
+
+        wins   = [t for t in sym_trades if float(t.get("profit",0)) > 0]
+        losses = [t for t in sym_trades if float(t.get("profit",0)) <= 0]
+        total  = len(sym_trades)
+        wr     = round(len(wins)/total*100) if total > 0 else 0
+        pnl    = sum(float(t.get("profit",0)) for t in sym_trades)
+        avg_w  = sum(float(t.get("profit",0)) for t in wins)   / len(wins)   if wins   else 0
+        avg_l  = sum(float(t.get("profit",0)) for t in losses) / len(losses) if losses else 0
+
+        # Direction breakdown
+        buys  = [t for t in sym_trades if str(t.get("type","")).upper() == "BUY"]
+        sells = [t for t in sym_trades if str(t.get("type","")).upper() == "SELL"]
+        buy_wr  = round(len([t for t in buys  if float(t.get("profit",0))>0])/len(buys)*100)  if buys  else None
+        sell_wr = round(len([t for t in sells if float(t.get("profit",0))>0])/len(sells)*100) if sells else None
+
+        # Current brain settings for this symbol
+        sym_cfg = _brain_config.get("symbols",{}).get(sym,{})
+
+        # Ask Claude for recommendation
+        recommendation = "No data — insufficient trades to analyse."
+        action = "MAINTAIN"
+        suggested = {}
+
+        if total >= 2:
+            try:
+                prompt = f"""You are the MCAPI Brain analyst. Review this symbol and give a precise recommendation.
+
+Symbol: {sym}
+Last 7 days: {total} trades | Win rate: {wr}% | Net P&L: ${pnl:.2f}
+Wins: {len(wins)} (avg +${avg_w:.2f}) | Losses: {len(losses)} (avg ${avg_l:.2f})
+BUY win rate: {buy_wr}% ({len(buys)} trades) | SELL win rate: {sell_wr}% ({len(sells)} trades)
+Current confidence threshold: {sym_cfg.get('confidence_threshold_pct',60)}%
+Current BB zone: {sym_cfg.get('bb_zone_pct',30)}%
+Current SL: {sym_cfg.get('sl_points',200)} points
+
+Recent trades: {[f"{t.get('type')} ${t.get('profit')}" for t in sym_trades[-5:]]}
+
+Respond in JSON only:
+{{
+  "action": "TIGHTEN" | "LOOSEN" | "PAUSE" | "MAINTAIN",
+  "reason": "one sentence explanation",
+  "recommendation": "2-3 sentences of specific advice",
+  "suggested_changes": {{
+    "confidence_threshold_pct": number or null,
+    "bb_zone_pct": number or null,
+    "sl_points": number or null
+  }}
+}}"""
+
+                resp = client.messages.create(
+                    model  = "claude-sonnet-4-6",
+                    max_tokens = 300,
+                    messages = [{"role":"user","content":prompt}]
+                )
+                text = resp.content[0].text.strip()
+                s = text.find("{"); e = text.rfind("}") + 1
+                if s >= 0 and e > s:
+                    d = json.loads(text[s:e])
+                    recommendation = d.get("recommendation","")
+                    action         = d.get("action","MAINTAIN")
+                    suggested      = {k:v for k,v in d.get("suggested_changes",{}).items() if v is not None}
+                    print(f"[BRAIN] {sym}: {action} — {d.get('reason','')}")
+            except Exception as e:
+                print(f"[BRAIN] {sym} analysis error: {e}")
+                recommendation = f"Win rate {wr}% over {total} trades. P&L: ${pnl:.2f}."
+                action = "PAUSE" if (total >= 3 and wr == 0) else ("TIGHTEN" if wr < 45 else "MAINTAIN")
+
+        report["symbols"][sym] = {
+            "total": total, "wins": len(wins), "losses": len(losses),
+            "win_rate": wr, "pnl": round(pnl,2),
+            "avg_win": round(avg_w,2), "avg_loss": round(avg_l,2),
+            "buy_wr": buy_wr, "sell_wr": sell_wr,
+            "action": action, "recommendation": recommendation,
+            "suggested_changes": suggested,
+            "current_settings": {
+                "confidence_threshold_pct": sym_cfg.get("confidence_threshold_pct",60),
+                "bb_zone_pct": sym_cfg.get("bb_zone_pct",30),
+                "sl_points": sym_cfg.get("sl_points",200),
+                "active": sym_cfg.get("active",True)
+            }
+        }
+
+    # Save to DB
+    try:
+        conn = _db_connect()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS brain_daily_report (
+                    id SERIAL PRIMARY KEY, report TEXT,
+                    generated_at TIMESTAMP DEFAULT NOW()
+                )""")
+            cur.execute("INSERT INTO brain_daily_report (report) VALUES (%s)",
+                        (json.dumps(report),))
+            # Keep only last 30 reports
+            cur.execute("""DELETE FROM brain_daily_report WHERE id NOT IN
+                          (SELECT id FROM brain_daily_report ORDER BY generated_at DESC LIMIT 30)""")
+            conn.commit(); cur.close(); conn.close()
+            print("[BRAIN] ✅ Daily report saved to database")
+    except Exception as e:
+        print(f"[BRAIN] Report save error: {e}")
+
+    print(f"[BRAIN] ═══ Daily Analysis Complete — {len(symbols)} symbols reviewed ═══\n")
+    return report
+
+
+# Latest report kept in memory for fast serving
+_latest_brain_report = None
+
+@app.route("/brain-report", methods=["GET"])
+def get_brain_report():
+    """Brain Settings loads this on open — shows latest daily analysis."""
+    global _latest_brain_report
+    # Try memory first
+    if _latest_brain_report:
+        return jsonify({"ok": True, "report": _latest_brain_report})
+    # Try DB
+    try:
+        conn = _db_connect()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("SELECT report, generated_at FROM brain_daily_report ORDER BY generated_at DESC LIMIT 1")
+            row = cur.fetchone()
+            cur.close(); conn.close()
+            if row:
+                rpt = json.loads(row[0])
+                _latest_brain_report = rpt
+                return jsonify({"ok": True, "report": rpt})
+    except Exception as e:
+        print(f"[BRAIN] Report fetch error: {e}")
+    return jsonify({"ok": False, "report": None, "message": "No report yet — runs daily at 04:00 UTC"})
+
+@app.route("/brain-report/run", methods=["POST"])
+def trigger_brain_report():
+    """Manually trigger the daily analysis from Brain Settings."""
+    global _latest_brain_report
+    try:
+        rpt = _run_daily_brain_analysis()
+        _latest_brain_report = rpt
+        return jsonify({"ok": True, "report": rpt})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def daily_analysis_loop():
+    """Thread: runs daily brain analysis at 04:00 UTC (06:00 SAST)."""
+    global _latest_brain_report
+    print("[BRAIN] Daily analysis thread started — fires at 04:00 UTC")
+    while True:
+        now = datetime.utcnow()
+        # Calculate seconds until next 04:00 UTC
+        target = now.replace(hour=4, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait = (target - now).total_seconds()
+        print(f"[BRAIN] Next daily analysis in {int(wait//3600)}h {int((wait%3600)//60)}m (04:00 UTC)")
+        time.sleep(wait)
+        try:
+            rpt = _run_daily_brain_analysis()
+            _latest_brain_report = rpt
+        except Exception as e:
+            print(f"[BRAIN] Daily analysis error: {e}")
+
+
 def get_scan_interval():
     """
     Dynamic scan interval based on active trading session.
@@ -2828,8 +3021,9 @@ def self_ping_loop():
             print(f"[PING] ⚠️  Self-ping failed: {e}")
         time.sleep(10 * 60)  # Every 10 minutes
 
-threading.Thread(target=scanner_loop,   daemon=True).start()
-threading.Thread(target=self_ping_loop, daemon=True).start()
+threading.Thread(target=scanner_loop,        daemon=True).start()
+threading.Thread(target=self_ping_loop,      daemon=True).start()
+threading.Thread(target=daily_analysis_loop, daemon=True).start()
 
 # ─── Database startup — load persisted trades ──────────────────────────────────
 init_db()
