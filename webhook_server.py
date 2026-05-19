@@ -1210,17 +1210,17 @@ def post_history():
             db_save_trade(data)
             _e7_record_close(symbol, float(profit))   # Engine 7 session tracking
 
-            # Engine 9: Update memory — infer session from close time, regime from direction
+            # Engine 9: Update memory with direction tracking
             trade_type = str(data.get("type", "BUY")).upper()
             stored_regime = str(data.get("regime", "")).upper()
             regime  = stored_regime if stored_regime in ["BULLISH","BEARISH","NEUTRAL"] else (
                 symbol_regimes.get(symbol.upper(), "BULLISH" if trade_type == "BUY" else "BEARISH")
             )
             session = _infer_session(data.get("close_time") or data.get("received_at", ""))
-            _memory_update(symbol, regime, session, float(profit) > 0)
-            mem_score = _get_memory_score(symbol, regime, session)
-            print(f"[ENGINE9] Memory updated: {symbol} {regime} {session} "
-                  f"{'WIN' if float(profit)>0 else 'LOSS'} → score={mem_score:+d}")
+            _memory_update(symbol, regime, session, float(profit) > 0, direction=trade_type)
+            mem_adj = _get_memory_confidence(symbol, trade_type, regime, session)
+            print(f"[ENGINE9] Memory updated: {symbol} {trade_type} {regime}/{session} "
+                  f"{'WIN' if float(profit)>0 else 'LOSS'} → adj={mem_adj:+.0f}%")
             print(f"[HISTORY] Received closed trade: {symbol} ${profit:.2f} [{source}]")
         return jsonify({"ok": True})
     except Exception as e:
@@ -1309,54 +1309,130 @@ def _infer_session(timestamp_str: str) -> str:
         return "London"
 
 
-def _memory_update(symbol: str, regime: str, session: str, won: bool):
-    """Add one trade result to memory_data."""
+def _memory_update(symbol: str, regime: str, session: str, won: bool, direction: str = ""):
+    """
+    ENGINE 9: Add one trade result to memory_data.
+    Now tracks DIRECTION (BUY/SELL) separately — the critical upgrade.
+    GOLD SELL losing streak no longer hides behind GOLD BUY wins.
+    """
     sym = symbol.upper()
+    dr  = direction.upper() if direction else ""
+
+    # Initialise symbol
     if sym not in memory_data:
         memory_data[sym] = {"overall": {"wins":0,"losses":0,"total":0}}
+
+    # Direction bucket (BUY or SELL)
+    if dr in ("BUY","SELL"):
+        if dr not in memory_data[sym]:
+            memory_data[sym][dr] = {"overall": {"wins":0,"losses":0,"total":0}}
+        if regime not in memory_data[sym][dr]:
+            memory_data[sym][dr][regime] = {}
+        if session not in memory_data[sym][dr][regime]:
+            memory_data[sym][dr][regime][session] = {"wins":0,"losses":0,"total":0}
+
+        cond = memory_data[sym][dr][regime][session]
+        dr_ov = memory_data[sym][dr]["overall"]
+        if won:
+            cond["wins"]  += 1; dr_ov["wins"]  += 1
+        else:
+            cond["losses"] += 1; dr_ov["losses"] += 1
+        cond["total"]  += 1; dr_ov["total"] += 1
+
+    # Regime+session bucket (direction-agnostic fallback)
     if regime not in memory_data[sym]:
         memory_data[sym][regime] = {}
     if session not in memory_data[sym][regime]:
         memory_data[sym][regime][session] = {"wins":0,"losses":0,"total":0}
-
-    bucket = memory_data[sym][regime][session]
+    bucket  = memory_data[sym][regime][session]
     overall = memory_data[sym]["overall"]
     if won:
-        bucket["wins"]   += 1
-        overall["wins"]  += 1
+        bucket["wins"]  += 1; overall["wins"]  += 1
     else:
-        bucket["losses"]  += 1
-        overall["losses"] += 1
-    bucket["total"]  += 1
-    overall["total"] += 1
+        bucket["losses"] += 1; overall["losses"] += 1
+    bucket["total"] += 1; overall["total"] += 1
+
+
+def _get_memory_confidence(symbol: str, direction: str, regime: str, session: str) -> float:
+    """
+    ENGINE 9: Returns a confidence ADJUSTMENT (-25 to +10) based on win rate memory.
+    Replaces the old +1/0/-1 system with a continuous percentage scale.
+
+    Adjustment is applied on top of Claude's signal confidence:
+      win rate  0% → -25%  (this setup keeps losing — penalise hard)
+      win rate 25% → -15%
+      win rate 40% → -5%
+      win rate 50% →  0%   (neutral)
+      win rate 65% → +5%
+      win rate 80% → +10%  (this setup keeps winning — reward)
+
+    Priority: direction+regime+session → direction+overall → regime+session → overall
+    Minimum sample size: 3 trades for direction, 5 for overall.
+    """
+    sym = symbol.upper()
+    dr  = direction.upper()
+    data = memory_data.get(sym, {})
+
+    def wr_to_adj(wr: float) -> float:
+        """Map win rate to confidence adjustment."""
+        if wr <= 0.00: return -25.0
+        if wr <= 0.25: return -15.0
+        if wr <= 0.40: return  -5.0
+        if wr <= 0.55: return   0.0
+        if wr <= 0.65: return  +5.0
+        return +10.0
+
+    # Level 1: direction + regime + session (most specific)
+    dr_data = data.get(dr, {})
+    cond = dr_data.get(regime, {}).get(session, {})
+    if cond.get("total", 0) >= 3:
+        wr = cond["wins"] / cond["total"]
+        adj = wr_to_adj(wr)
+        print(f"[ENGINE9] {sym} {dr} {regime}/{session}: {cond['wins']}/{cond['total']} "
+              f"= {wr*100:.0f}% WR → confidence adj {adj:+.0f}%")
+        return adj
+
+    # Level 2: direction overall
+    dr_ov = dr_data.get("overall", {})
+    if dr_ov.get("total", 0) >= 3:
+        wr = dr_ov["wins"] / dr_ov["total"]
+        adj = wr_to_adj(wr)
+        print(f"[ENGINE9] {sym} {dr} overall: {dr_ov['wins']}/{dr_ov['total']} "
+              f"= {wr*100:.0f}% WR → confidence adj {adj:+.0f}%")
+        return adj
+
+    # Level 3: regime + session (direction-agnostic)
+    cond2 = data.get(regime, {}).get(session, {})
+    if cond2.get("total", 0) >= 3:
+        wr = cond2["wins"] / cond2["total"]
+        return wr_to_adj(wr)
+
+    # Level 4: symbol overall (5 trade minimum)
+    ov = data.get("overall", {})
+    if ov.get("total", 0) >= 5:
+        wr = ov["wins"] / ov["total"]
+        return wr_to_adj(wr)
+
+    print(f"[ENGINE9] {sym} {dr}: insufficient data — no adjustment")
+    return 0.0  # Not enough data — neutral
 
 
 def _get_memory_score(symbol: str, regime: str, session: str) -> int:
-    """
-    Engine 9: Returns priority adjustment based on historical win rate.
-    +1 = strong track record in these conditions (≥75% win rate, ≥3 trades)
-     0 = neutral or insufficient data
-    -1 = poor track record (≤40% win rate, ≥3 trades)
-    """
+    """Legacy +1/0/-1 score — kept for Claude hint string."""
     sym  = symbol.upper()
     data = memory_data.get(sym, {})
-
-    # Check specific condition (regime + session) — most specific data
     cond = data.get(regime, {}).get(session, {})
     if cond.get("total", 0) >= 3:
         wr = cond["wins"] / cond["total"]
         if wr >= 0.75: return +1
         if wr <= 0.40: return -1
         return 0
-
-    # Fall back to overall symbol win rate
     overall = data.get("overall", {})
     if overall.get("total", 0) >= 5:
         wr = overall["wins"] / overall["total"]
         if wr >= 0.75: return +1
         if wr <= 0.40: return -1
-
-    return 0  # Not enough data yet — neutral
+    return 0
 
 
 def _rebuild_memory():
@@ -1375,13 +1451,12 @@ def _rebuild_memory():
         ot     = str(trade.get("open_time") or trade.get("timestamp") or "")
         if not sym:
             continue
-        # Infer regime from direction
         stored_regime = str(trade.get("regime", "")).upper()
         regime = stored_regime if stored_regime in ["BULLISH","BEARISH","NEUTRAL"] else (
             "BULLISH" if ttype == "BUY" else "BEARISH"
         )
         session = _infer_session(ot)
-        _memory_update(sym, regime, session, profit > 0)
+        _memory_update(sym, regime, session, profit > 0, direction=ttype)
         count += 1
     print(f"[ENGINE9] Memory rebuilt from {count} trades — "
           f"{len(memory_data)} symbols tracked")
@@ -2504,7 +2579,52 @@ def run_scanner():
 
         print(f"[ENGINE4] Final pick: {final_sym} {final_action} Score:{final_score}/5")
 
-        # ── Step 4.4: ENGINE 7 — Symbol-level risk gate ───────────────────────
+        # ── Step 4.45: ENGINE 9 — Memory confidence gate ─────────────────────
+        # Apply direction-aware win rate memory as a HARD GATE.
+        # If this exact setup (symbol + direction + regime + session) has been
+        # losing consistently — raise the bar or block entirely.
+        mem_regime  = symbol_regimes.get(final_sym.upper(), "NEUTRAL")
+        mem_adj     = _get_memory_confidence(final_sym, final_action, mem_regime, session)
+        brain_threshold = _brain_config.get("symbols", {}).get(final_sym, {}).get(
+                          "confidence_threshold_pct", 60)
+
+        # Convert score to confidence %: 1→20, 2→40, 3→60, 4→80, 5→100
+        base_confidence = final_score * 20
+        adjusted_confidence = base_confidence + mem_adj
+
+        print(f"[ENGINE9] {final_sym} {final_action}: base={base_confidence}% "
+              f"mem_adj={mem_adj:+.0f}% adjusted={adjusted_confidence:.0f}% "
+              f"threshold={brain_threshold}%")
+
+        if adjusted_confidence < brain_threshold:
+            # Memory shows this setup has poor track record — try alternative
+            print(f"[ENGINE9] ❌ BLOCKED — adjusted confidence {adjusted_confidence:.0f}% "
+                  f"< threshold {brain_threshold}%. Memory says: avoid {final_sym} {final_action}.")
+            # Try next candidate
+            e9_blocked = True
+            for alt_sym in candidates_to_try[:5]:
+                if alt_sym == final_sym:
+                    continue
+                alt_action = regime_actions.get(alt_sym, "BUY")
+                alt_regime = symbol_regimes.get(alt_sym.upper(), "NEUTRAL")
+                alt_score  = _claude_validate(alt_sym, alt_action, "0", "BB")
+                alt_adj    = _get_memory_confidence(alt_sym, alt_action, alt_regime, session)
+                alt_conf   = alt_score * 20 + alt_adj
+                alt_thresh = _brain_config.get("symbols", {}).get(alt_sym, {}).get(
+                             "confidence_threshold_pct", 60)
+                if alt_conf >= alt_thresh:
+                    print(f"[ENGINE9] ✅ Alternative: {alt_sym} {alt_action} conf={alt_conf:.0f}%")
+                    final_sym    = alt_sym
+                    final_action = alt_action
+                    final_score  = alt_score
+                    adjusted_confidence = alt_conf
+                    e9_blocked = False
+                    break
+            if e9_blocked:
+                print(f"[ENGINE9] All candidates blocked by memory — holding this scan")
+                return
+        else:
+            print(f"[ENGINE9] ✅ PASS — confidence {adjusted_confidence:.0f}% ≥ {brain_threshold}%")
         e7_sym_ok, e7_sym_reason = _e7_check_scanner(final_sym)
         print(f"[ENGINE7] {e7_sym_reason}")
         if not e7_sym_ok:
