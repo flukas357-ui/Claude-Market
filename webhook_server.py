@@ -1053,6 +1053,10 @@ def _sync_brain_to_personality():
         p["priority"] = 3 if w >= 80 else 2 if w >= 50 else 1
 
     print("[BRAIN] ✅ Config synced to personality engine")
+
+
+def _load_brain_config():
+    """Load config from DB on startup."""
     global _brain_config
     try:
         conn = _db_connect()
