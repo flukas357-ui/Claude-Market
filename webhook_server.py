@@ -3004,15 +3004,90 @@ Respond in JSON only:
 
 # Latest report kept in memory for fast serving
 _latest_brain_report = None
+_report_apply_status  = {}   # {sym: {status, applied_at, applied_by, changes}}
+
+def _derive_changes_for_action(sym: str, action: str, suggested: dict) -> dict:
+    """Derive setting changes from action type when suggested_changes is empty."""
+    if suggested:
+        return {k: v for k, v in suggested.items() if v is not None}
+    if action == "PAUSE":
+        return {"active": False}
+    s = _brain_config.get("symbols", {}).get(sym, {})
+    conf = s.get("confidence_threshold_pct", 60)
+    zone = s.get("bb_zone_pct", 30)
+    if action == "TIGHTEN":
+        return {
+            "confidence_threshold_pct": min(90, conf + 8),
+            "bb_zone_pct":              max(10, zone - 5)
+        }
+    if action == "LOOSEN":
+        return {
+            "confidence_threshold_pct": max(40, conf - 5),
+            "bb_zone_pct":              min(45, zone + 5)
+        }
+    return {}
+
+def _auto_apply_report_changes():
+    """
+    Auto-apply pending report changes 30 min after daily analysis.
+    Fires at 04:30 UTC (06:30 SAST) if user has not applied manually.
+    """
+    global _report_apply_status
+    rpt = _latest_brain_report
+    if not rpt:
+        return
+    applied_count = 0
+    for sym, data in rpt.get("symbols", {}).items():
+        action = data.get("action", "MAINTAIN")
+        if action in ("MAINTAIN", "COOLING"):
+            if sym not in _report_apply_status:
+                _report_apply_status[sym] = {
+                    "status":     "NO_CHANGES",
+                    "applied_at": None,
+                    "applied_by": None,
+                    "changes":    {}
+                }
+            continue
+        # Skip if already applied by user
+        st = _report_apply_status.get(sym, {})
+        if st.get("status") in ("USER_APPLIED", "AUTO_APPLIED"):
+            continue
+        # Skip if in cooling
+        cooling, *_ = _is_cooling(sym)
+        if cooling:
+            continue
+        # Auto-apply
+        changes = _derive_changes_for_action(sym, action, data.get("suggested_changes", {}))
+        if changes and sym in _brain_config.get("symbols", {}):
+            _brain_config["symbols"][sym].update(changes)
+            sym_trades = len([t for t in trade_history
+                              if str(t.get("symbol","")).upper() == sym.upper()])
+            _brain_config["symbols"][sym]["last_changed_at"]         = datetime.utcnow().isoformat()
+            _brain_config["symbols"][sym]["trades_at_change"]         = sym_trades
+            _brain_config["symbols"][sym]["min_trades_before_review"] = 10
+            _brain_config["symbols"][sym]["min_hours_before_review"]  = 24
+            _report_apply_status[sym] = {
+                "status":     "AUTO_APPLIED",
+                "applied_at": datetime.utcnow().isoformat(),
+                "applied_by": "AUTO",
+                "changes":    changes
+            }
+            applied_count += 1
+            print(f"[AUTO-APPLY] {sym} [{action}] — {changes}")
+    if applied_count:
+        _save_brain_config()
+        _sync_brain_to_personality()
+        print(f"[AUTO-APPLY] ✅ Applied to {applied_count} symbols automatically at 06:30 SAST")
+    else:
+        print("[AUTO-APPLY] No pending changes to apply")
 
 @app.route("/brain-report", methods=["GET"])
 def get_brain_report():
     """Brain Settings loads this on open — shows latest daily analysis."""
     global _latest_brain_report
-    # Try memory first
     if _latest_brain_report:
-        return jsonify({"ok": True, "report": _latest_brain_report})
-    # Try DB
+        return jsonify({"ok": True, "report": _latest_brain_report,
+                        "apply_status": _report_apply_status})
     try:
         conn = _db_connect()
         if conn:
@@ -3023,18 +3098,84 @@ def get_brain_report():
             if row:
                 rpt = json.loads(row[0])
                 _latest_brain_report = rpt
-                return jsonify({"ok": True, "report": rpt})
+                return jsonify({"ok": True, "report": rpt,
+                                "apply_status": _report_apply_status})
     except Exception as e:
         print(f"[BRAIN] Report fetch error: {e}")
     return jsonify({"ok": False, "report": None, "message": "No report yet — runs daily at 04:00 UTC"})
 
+@app.route("/brain-report/apply", methods=["POST"])
+def apply_report_changes():
+    """User applies recommended changes from Brain Settings."""
+    global _report_apply_status
+    try:
+        data    = request.get_json(force=True)
+        sym     = data.get("symbol","").upper()
+        action  = data.get("action","")
+        changes = data.get("changes", {})
+        apply_all = data.get("apply_all", False)
+
+        targets = {}
+        if apply_all and _latest_brain_report:
+            for s, d in _latest_brain_report.get("symbols", {}).items():
+                a = d.get("action","MAINTAIN")
+                if a in ("MAINTAIN","COOLING"): continue
+                st = _report_apply_status.get(s, {})
+                if st.get("status") in ("USER_APPLIED","AUTO_APPLIED"): continue
+                cooling,*_ = _is_cooling(s)
+                if cooling: continue
+                ch = _derive_changes_for_action(s, a, d.get("suggested_changes",{}))
+                if ch: targets[s] = (a, ch)
+        elif sym and changes:
+            targets[sym] = (action, changes)
+        elif sym and action and _latest_brain_report:
+            d = _latest_brain_report.get("symbols",{}).get(sym,{})
+            ch = _derive_changes_for_action(sym, action, d.get("suggested_changes",{}))
+            if ch: targets[sym] = (action, ch)
+
+        applied = {}
+        now = datetime.utcnow().isoformat()
+        for s, (a, ch) in targets.items():
+            if s in _brain_config.get("symbols",{}):
+                _brain_config["symbols"][s].update(ch)
+                sym_trades = len([t for t in trade_history
+                                  if str(t.get("symbol","")).upper() == s.upper()])
+                _brain_config["symbols"][s]["last_changed_at"]         = now
+                _brain_config["symbols"][s]["trades_at_change"]         = sym_trades
+                _brain_config["symbols"][s]["min_trades_before_review"] = 10
+                _brain_config["symbols"][s]["min_hours_before_review"]  = 24
+                _report_apply_status[s] = {
+                    "status":     "USER_APPLIED",
+                    "applied_at": now,
+                    "applied_by": "USER",
+                    "changes":    ch
+                }
+                applied[s] = ch
+                print(f"[USER-APPLY] {s} [{a}] — {ch}")
+
+        if applied:
+            _save_brain_config()
+            _sync_brain_to_personality()
+
+        return jsonify({"ok": True, "applied": applied,
+                        "apply_status": _report_apply_status})
+    except Exception as e:
+        print(f"[APPLY] Error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/brain-report/status", methods=["GET"])
+def get_report_status():
+    """Returns apply status for all symbols in current report."""
+    return jsonify({"ok": True, "apply_status": _report_apply_status})
+
 @app.route("/brain-report/run", methods=["POST"])
 def trigger_brain_report():
     """Manually trigger the daily analysis from Brain Settings."""
-    global _latest_brain_report
+    global _latest_brain_report, _report_apply_status
     try:
         rpt = _run_daily_brain_analysis()
         _latest_brain_report = rpt
+        _report_apply_status = {}   # Reset apply status for new report
         return jsonify({"ok": True, "report": rpt})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -3063,23 +3204,33 @@ def brain_ask():
 
 
 def daily_analysis_loop():
-    """Thread: runs daily brain analysis at 04:00 UTC (06:00 SAST)."""
-    global _latest_brain_report
+    """Thread: runs daily brain analysis at 04:00 UTC (06:00 SAST).
+       Auto-applies pending changes at 04:30 UTC (06:30 SAST) if user hasn't acted."""
+    global _latest_brain_report, _report_apply_status
     print("[BRAIN] Daily analysis thread started — fires at 04:00 UTC")
     while True:
-        now = datetime.utcnow()
-        # Calculate seconds until next 04:00 UTC
+        now    = datetime.utcnow()
         target = now.replace(hour=4, minute=0, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
         wait = (target - now).total_seconds()
-        print(f"[BRAIN] Next daily analysis in {int(wait//3600)}h {int((wait%3600)//60)}m (04:00 UTC)")
+        print(f"[BRAIN] Next daily analysis in {int(wait//3600)}h {int((wait%3600)//60)}m (04:00 UTC / 06:00 SAST)")
         time.sleep(wait)
         try:
-            rpt = _run_daily_brain_analysis()
+            rpt                  = _run_daily_brain_analysis()
             _latest_brain_report = rpt
+            _report_apply_status = {}   # Fresh status for new report
+            print("[BRAIN] ✅ Daily report generated — user has 30 min to review before auto-apply")
         except Exception as e:
             print(f"[BRAIN] Daily analysis error: {e}")
+
+        # Wait 30 minutes then auto-apply any PENDING changes
+        print("[BRAIN] Auto-apply scheduled for 04:30 UTC (06:30 SAST) in 30 min")
+        time.sleep(30 * 60)
+        try:
+            _auto_apply_report_changes()
+        except Exception as e:
+            print(f"[BRAIN] Auto-apply error: {e}")
 
 
 def get_scan_interval():
