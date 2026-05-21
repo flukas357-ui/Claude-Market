@@ -199,6 +199,8 @@ scan_results     = {             # Scanner intelligence data
 recently_traded  = {}  # {symbol: datetime} — 6-hour expiry rotation guard
 scan_lock        = threading.Lock()
 symbol_regimes   = {}  # Engine 1: {symbol: "BULLISH"/"NEUTRAL"/"BEARISH"}
+regime_since     = {}  # Engine 1: {symbol: ISO timestamp when regime last changed}
+scan_details     = {}  # Per-symbol detail from last scan (for popup)
 bb_data          = {}  # Engine 6: {symbol: {upper,middle,lower,price,location,range}}
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1205,8 +1207,12 @@ def receive_status():
         ea_sym    = str(data.get("symbol","")).strip().upper()
         ea_regime = str(data.get("regime","NEUTRAL")).upper().strip()
         if ea_sym and ea_regime in ["BULLISH","BEARISH","NEUTRAL"]:
+            now_iso = datetime.utcnow().isoformat()
             if symbol_regimes.get(ea_sym) != ea_regime:
-                print(f"[REGIME] {ea_sym} = {ea_regime} (EA: EMA50/200+ADX14 H1)")
+                print(f"[REGIME] {ea_sym} = {ea_regime} (changed from {symbol_regimes.get(ea_sym,'?')})")
+                regime_since[ea_sym] = now_iso  # Track when regime changed
+            elif ea_sym not in regime_since:
+                regime_since[ea_sym] = now_iso  # First time seeing this symbol
             symbol_regimes[ea_sym] = ea_regime
             scan_results["regimes"] = dict(symbol_regimes)
 
@@ -1948,6 +1954,7 @@ def get_live():
         "engines":        engines,
         "bb_live":        bb_data,
         "regimes":        symbol_regimes,
+        "regime_since":   regime_since,
         "risk":           {
             "drawdown_pct":       e7_risk["portfolio_drawdown_pct"],
             "portfolio_paused":   e7_risk["portfolio_paused"],
@@ -3182,6 +3189,75 @@ def trigger_brain_report():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
+@app.route("/scan-detail", methods=["GET"])
+def get_scan_detail():
+    """Returns per-symbol scan status for CC popup — what each engine decided."""
+    now = datetime.utcnow()
+    detail = {}
+    syms = ["GOLD","SILVER","EURUSD","USDZAR","BTCUSD","ETHUSD","US_TECH100","US_500"]
+    open_syms = {str(p.get("symbol","")).upper() for p in
+                 (mt5_status.get("account",{}).get("positions",[]) if mt5_status else [])}
+
+    for sym in syms:
+        bb   = bb_data.get(sym, {})
+        loc  = bb.get("location", 0.5)
+        reg  = symbol_regimes.get(sym, "NEUTRAL")
+        rs   = regime_since.get(sym)
+        cfg  = _brain_config.get("symbols", {}).get(sym, {})
+        h = now.hour + now.minute/60.0
+        # Session check
+        in_session = True
+        sess_block = ""
+        if not cfg.get("session_asian", True) and (h < 8 or h >= 22):
+            in_session = False; sess_block = "Asian session blocked"
+        if not cfg.get("session_london", True) and 8 <= h < 13.5:
+            in_session = False; sess_block = "London session blocked"
+        if not cfg.get("session_newyork", True) and 13.5 <= h < 22:
+            in_session = False; sess_block = "NY session (opens 19:00 SAST)"
+        # BB zone check
+        zone = cfg.get("bb_zone_pct", 30) / 100.0
+        in_zone = loc <= zone or loc >= (1 - zone)
+        zone_str = f"{round(loc*100,1)}% ({'lower' if loc < 0.5 else 'upper'} band)"
+        # Regime duration
+        regime_dur = ""
+        if rs:
+            try:
+                diff = (now - datetime.fromisoformat(rs)).total_seconds()
+                h2, m2 = int(diff//3600), int((diff%3600)//60)
+                regime_dur = f"{h2}h {m2}m" if h2 else f"{m2}m"
+            except: pass
+        # Block reason
+        if sym in open_syms:
+            block = "Position already open"
+        elif not in_session:
+            block = sess_block
+        elif reg == "NEUTRAL":
+            block = f"Regime NEUTRAL {regime_dur}"
+        elif not in_zone:
+            block = f"BB not at extreme ({zone_str})"
+        else:
+            block = "✅ Qualifying"
+        detail[sym] = {
+            "bb_location": round(loc*100, 1),
+            "bb_zone_str": zone_str,
+            "regime":      reg,
+            "regime_since": rs,
+            "regime_duration": regime_dur,
+            "in_session":  in_session,
+            "in_zone":     in_zone,
+            "open_position": sym in open_syms,
+            "block_reason": block
+        }
+    return jsonify({
+        "ok":          True,
+        "last_scan":   scan_results.get("last_run"),
+        "next_scan":   scan_results.get("next_run"),
+        "signal_fired": scan_results.get("last_winner") is not None,
+        "last_winner": scan_results.get("last_winner"),
+        "symbols":     detail,
+        "timestamp":   now.isoformat()
+    })
 
 @app.route("/brain-ask", methods=["POST"])
 def brain_ask():
