@@ -2952,23 +2952,20 @@ def trigger_brain_report():
 
 @app.route("/brain-ask", methods=["POST"])
 def brain_ask():
-    """
-    Brain Settings AI chat — proxies browser questions through webhook.
-    Browser cannot call Anthropic directly (CORS). Webhook holds the API key.
-    """
+    """Brain Settings AI chat — proxies browser questions through webhook."""
     try:
-        data    = request.get_json(force=True)
-        prompt  = data.get("prompt", "").strip()
+        data       = request.get_json(force=True)
+        prompt     = data.get("prompt", "").strip()
+        max_tokens = int(data.get("max_tokens", 600))
         if not prompt:
             return jsonify({"ok": False, "error": "No prompt provided"}), 400
-
         resp = client.messages.create(
             model      = "claude-sonnet-4-6",
-            max_tokens = 500,
+            max_tokens = max_tokens,
             messages   = [{"role": "user", "content": prompt}]
         )
         answer = resp.content[0].text.strip()
-        print(f"[BRAIN-ASK] Q: {prompt[:80]}...")
+        print(f"[BRAIN-ASK] tokens={max_tokens} Q: {prompt[:60]}...")
         return jsonify({"ok": True, "answer": answer})
     except Exception as e:
         print(f"[BRAIN-ASK] Error: {e}")
