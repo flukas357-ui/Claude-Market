@@ -1192,6 +1192,8 @@ def cooling_status():
             "progress_hours":   f"{hours_since:.1f}/{min_hours}h",
         }
     return jsonify({"ok": True, "status": result})
+
+@app.route("/status", methods=["POST"])
 def receive_status():
     global mt5_status, trade_history, symbol_regimes, bb_data
     try:
