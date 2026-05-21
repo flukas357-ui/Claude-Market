@@ -1115,13 +1115,25 @@ def post_config():
     global _brain_config
     try:
         data = request.get_json(force=True)
-        # Merge changes — supports full replace or partial update
+        now  = datetime.utcnow().isoformat()
         if "system" in data:
             _brain_config["system"].update(data["system"])
         if "symbols" in data:
             for sym, settings in data["symbols"].items():
                 if sym in _brain_config["symbols"]:
-                    _brain_config["symbols"][sym].update(settings)
+                    # Strip meta keys from incoming data before updating
+                    meta_keys = {"last_changed_at","trades_at_change","min_trades_before_review","min_hours_before_review"}
+                    real_changes = {k:v for k,v in settings.items() if k not in meta_keys}
+                    if real_changes:
+                        _brain_config["symbols"][sym].update(real_changes)
+                        # Record cooling metadata
+                        sym_trades = len([t for t in trade_history
+                                          if str(t.get("symbol","")).upper() == sym.upper()])
+                        _brain_config["symbols"][sym]["last_changed_at"]       = now
+                        _brain_config["symbols"][sym]["trades_at_change"]       = sym_trades
+                        _brain_config["symbols"][sym]["min_trades_before_review"] = 10
+                        _brain_config["symbols"][sym]["min_hours_before_review"]  = 24
+                        print(f"[COOLING] {sym} cooling started — {sym_trades} trades at change time")
         saved = _save_brain_config()
         print(f"[BRAIN] Config updated and {'saved' if saved else 'save failed'}")
         return jsonify({"ok": True, "saved": saved, "config": _brain_config})
@@ -1135,7 +1147,51 @@ def reset_config():
     _brain_config = dict(DEFAULT_CONFIG)
     _save_brain_config()
     return jsonify({"ok": True, "config": _brain_config})
-@app.route("/status", methods=["POST"])
+
+def _is_cooling(sym: str):
+    """
+    Check if a symbol is in cooling period after a settings change.
+    Returns: (is_cooling, trades_since, trades_needed, hours_since, hours_needed)
+    Both minimum trades AND minimum hours must pass before new recommendations.
+    """
+    s = _brain_config.get("symbols", {}).get(sym, {})
+    last_changed = s.get("last_changed_at")
+    if not last_changed:
+        return False, 0, 10, 0, 24
+
+    try:
+        changed_dt   = datetime.fromisoformat(last_changed)
+        hours_since  = (datetime.utcnow() - changed_dt).total_seconds() / 3600
+        trades_at    = int(s.get("trades_at_change", 0))
+        sym_trades   = len([t for t in trade_history
+                            if str(t.get("symbol","")).upper() == sym.upper()])
+        trades_since = max(0, sym_trades - trades_at)
+        min_trades   = int(s.get("min_trades_before_review", 10))
+        min_hours    = int(s.get("min_hours_before_review", 24))
+        cooling      = (hours_since < min_hours) or (trades_since < min_trades)
+        return cooling, trades_since, min_trades, round(hours_since, 1), min_hours
+    except Exception as e:
+        print(f"[COOLING] Error checking {sym}: {e}")
+        return False, 0, 10, 0, 24
+
+@app.route("/cooling-status", methods=["GET"])
+def cooling_status():
+    """Returns cooling period status for all symbols."""
+    result = {}
+    for sym in _brain_config.get("symbols", {}):
+        cooling, trades_since, min_trades, hours_since, min_hours = _is_cooling(sym)
+        s = _brain_config["symbols"][sym]
+        result[sym] = {
+            "cooling":          cooling,
+            "trades_since":     trades_since,
+            "min_trades":       min_trades,
+            "hours_since":      hours_since,
+            "min_hours":        min_hours,
+            "last_changed_at":  s.get("last_changed_at"),
+            "progress_trades":  f"{trades_since}/{min_trades}",
+            "progress_hours":   f"{hours_since:.1f}/{min_hours}h",
+        }
+    return jsonify({"ok": True, "status": result})
 def receive_status():
     global mt5_status, trade_history, symbol_regimes, bb_data
     try:
@@ -2823,6 +2879,40 @@ def _run_daily_brain_analysis():
 
         # Current brain settings for this symbol
         sym_cfg = _brain_config.get("symbols",{}).get(sym,{})
+
+        # ── Cooling period check ─────────────────────────────────────────────
+        # Do NOT recommend new changes if previous changes haven't had
+        # enough trades/time to show results yet.
+        cooling, trades_since, min_trades, hours_since, min_hours = _is_cooling(sym)
+        if cooling:
+            remaining_trades = max(0, min_trades - trades_since)
+            remaining_hours  = max(0, min_hours - hours_since)
+            cooling_msg = (f"Settings changed {hours_since:.1f}h ago. "
+                           f"Collected {trades_since}/{min_trades} trades since change. "
+                           f"Need {remaining_trades} more trades and {remaining_hours:.1f}h "
+                           f"before new recommendations. Letting current settings breathe.")
+            print(f"[COOLING] {sym} still cooling — {trades_since}/{min_trades} trades, {hours_since:.1f}h")
+            report["symbols"][sym] = {
+                "total": total, "wins": len(wins), "losses": len(losses),
+                "win_rate": wr, "pnl": round(pnl,2),
+                "avg_win": round(avg_w,2), "avg_loss": round(avg_l,2),
+                "buy_wr": buy_wr, "sell_wr": sell_wr,
+                "action": "COOLING",
+                "recommendation": cooling_msg,
+                "suggested_changes": {},
+                "cooling": True,
+                "trades_since_change": trades_since,
+                "min_trades": min_trades,
+                "hours_since_change": round(hours_since,1),
+                "current_settings": {
+                    "confidence_threshold_pct": sym_cfg.get("confidence_threshold_pct",60),
+                    "bb_zone_pct": sym_cfg.get("bb_zone_pct",30),
+                    "sl_points": sym_cfg.get("sl_points",200),
+                    "active": sym_cfg.get("active",True)
+                }
+            }
+            continue  # Skip Claude analysis — too early
+        # ────────────────────────────────────────────────────────────────────
 
         # Ask Claude for recommendation
         recommendation = "No data — insufficient trades to analyse."
